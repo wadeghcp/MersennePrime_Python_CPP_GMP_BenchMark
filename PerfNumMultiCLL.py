@@ -47,6 +47,12 @@ def main(argv=None):
     ap.add_argument("--all", action="store_true", help="print every tested exponent, not only the Mersenne hits")
     ap.add_argument("--json", metavar="FILE", help="write results + timings to FILE")
     ap.add_argument("--progress", type=float, default=10.0, metavar="SEC", help="print a progress line every SEC seconds (0 = off)")
+    ap.add_argument("--order", choices=("sorted", "done"), default="sorted",
+                    help="sorted (default): results stream out in ascending p, each printed as soon as every smaller "
+                         "exponent has finished; done: print in completion order, whatever finishes first")
+    ap.add_argument("--gap", type=float, default=3.0, metavar="SEC",
+                    help="sorted mode: coalesce output into blocks, flushing a block once it is SEC seconds old "
+                         "or 200 lines long (0 = print each line immediately)")
     a = ap.parse_args(argv)
 
     if a.return_num_primes_in_range:
@@ -66,21 +72,50 @@ def main(argv=None):
     print(hdr); print("-" * len(hdr), flush=True)
     t_start = time.perf_counter(); hits = []; rows = []; done = 0; last_prog = t_start
     Ex = ThreadPoolExecutor if a.workers == "threads" else ProcessPoolExecutor
+
+    def line(p, r, dt, at):
+        return (f"{p:>12} | {('YES' if r else 'no'):^13} | {dt:>10.4f} | {at:>12.3f} | "
+                f"{ll.mersenne_digits(p) if r else '':>8} | {'yes' if p in known else ('NEW?!' if r else '')}")
+
+    ordered = a.order == "sorted"
+    # sorted mode submits SMALLEST first so the in-order frontier advances immediately; done mode
+    # submits largest first for the best load balance at the tail.
+    submit_order = sorted(exps) if ordered else sorted(exps, reverse=True)
+    results = {}                     # p -> (r, dt, at)   completed, not yet printed (sorted mode)
+    frontier = 0                     # index into sorted(exps) of the next exponent to print
+    exps_sorted = sorted(exps)
+    block = []; block_born = None
     with Ex(max_workers=a.threads) as ex:
-        # submit biggest first (load balance), but REPORT IN COMPLETION ORDER so results stream out
-        # as they finish instead of waiting behind the slowest exponent (2026-09-12 fix).
-        futs = [ex.submit(test_one, p) for p in sorted(exps, reverse=True)]
+        futs = [ex.submit(test_one, p) for p in submit_order]
         for f in as_completed(futs):
             p, r, dt = f.result(); done += 1
+            now = time.perf_counter(); at = now - t_start
             rows.append({"p": p, "mersenne": r, "ll_s": round(dt, 6)})
             if r: hits.append(p)
-            now = time.perf_counter()
-            if r or a.all:
-                print(f"{p:>12} | {('YES' if r else 'no'):^13} | {dt:>10.4f} | {now-t_start:>12.3f} | "
-                      f"{ll.mersenne_digits(p) if r else '':>8} | {'yes' if p in known else ('NEW?!' if r else '')}", flush=True)
+            if not ordered:
+                if r or a.all: print(line(p, r, dt, at), flush=True)
+            else:
+                results[p] = (r, dt, at)
+                # advance the frontier over everything that is now in order
+                while frontier < len(exps_sorted) and exps_sorted[frontier] in results:
+                    q = exps_sorted[frontier]; rq, dq, aq = results.pop(q); frontier += 1
+                    if rq or a.all:
+                        if not block: block_born = now
+                        block.append(line(q, rq, dq, aq))
+                if block and (a.gap == 0 or len(block) >= 200):
+                    print("\n".join(block), flush=True); block = []
             if a.progress and now - last_prog >= a.progress:
-                print(f"    ... {done}/{len(exps)} done, {len(hits)} hits, {now-t_start:.0f} s elapsed", file=sys.stderr, flush=True)
-                last_prog = now
+                print(f"    ... {done}/{len(exps)} done, {len(hits)} hits, {now-t_start:.0f} s elapsed"
+                      + (f", next in order: p={exps_sorted[frontier]}" if ordered and frontier < len(exps_sorted) else ""),
+                      file=sys.stderr, flush=True); last_prog = now
+            # coalescing: a block is flushed once its oldest line is --gap seconds old
+            if ordered and block and a.gap and now - block_born >= a.gap:
+                print("\n".join(block), flush=True); block = []
+        # the executor drains here; everything is in results -> flush in order
+        while ordered and frontier < len(exps_sorted):
+            q = exps_sorted[frontier]; rq, dq, aq = results.pop(q); frontier += 1
+            if rq or a.all: block.append(line(q, rq, dq, aq))
+        if block: print("\n".join(block), flush=True)
     total = time.perf_counter() - t_start
     hits.sort()
     print("-" * len(hdr), flush=True)
