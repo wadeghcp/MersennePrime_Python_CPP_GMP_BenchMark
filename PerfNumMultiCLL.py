@@ -13,7 +13,7 @@ Splits Lucas-Lehmer tests over N workers. Two executors:
   PerfNumMultiCLL.py -r 10001 --json out.json
 """
 import argparse, json, os, sys, time
-from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed
 
 import lucaslehmer as ll
 
@@ -46,6 +46,7 @@ def main(argv=None):
     g.add_argument("-n", "--return_num_primes_in_range", type=int, nargs=2, metavar=("LO", "HI"), help="just count the primes in [LO, HI]")
     ap.add_argument("--all", action="store_true", help="print every tested exponent, not only the Mersenne hits")
     ap.add_argument("--json", metavar="FILE", help="write results + timings to FILE")
+    ap.add_argument("--progress", type=float, default=10.0, metavar="SEC", help="print a progress line every SEC seconds (0 = off)")
     a = ap.parse_args(argv)
 
     if a.return_num_primes_in_range:
@@ -60,21 +61,29 @@ def main(argv=None):
     known = known_exponents()
     gil = getattr(sys, "_is_gil_enabled", lambda: True)()
     print(f"python {sys.version.split()[0]}  gil={'on' if gil else 'off'}  gmp {ll.gmp_version}  "
-          f"workers={a.threads} ({a.workers})  exponents={len(exps)}  max p={max(exps)}")
+          f"workers={a.threads} ({a.workers})  exponents={len(exps)}  max p={max(exps)}", flush=True)
     hdr = f"{'exponent p':>12} | {'2^p-1 prime?':^13} | {'LL time s':>10} | {'from start s':>12} | {'digits':>8} | known"
-    print(hdr); print("-" * len(hdr))
-    t_start = time.perf_counter(); hits = []; rows = []
+    print(hdr); print("-" * len(hdr), flush=True)
+    t_start = time.perf_counter(); hits = []; rows = []; done = 0; last_prog = t_start
     Ex = ThreadPoolExecutor if a.workers == "threads" else ProcessPoolExecutor
     with Ex(max_workers=a.threads) as ex:
-        for p, r, dt in ex.map(test_one, sorted(exps, reverse=True)):   # biggest first: better load balance
+        # submit biggest first (load balance), but REPORT IN COMPLETION ORDER so results stream out
+        # as they finish instead of waiting behind the slowest exponent (2026-09-12 fix).
+        futs = [ex.submit(test_one, p) for p in sorted(exps, reverse=True)]
+        for f in as_completed(futs):
+            p, r, dt = f.result(); done += 1
             rows.append({"p": p, "mersenne": r, "ll_s": round(dt, 6)})
             if r: hits.append(p)
+            now = time.perf_counter()
             if r or a.all:
-                print(f"{p:>12} | {('YES' if r else 'no'):^13} | {dt:>10.4f} | {time.perf_counter()-t_start:>12.3f} | "
-                      f"{ll.mersenne_digits(p) if r else '':>8} | {'yes' if p in known else ('NEW?!' if r else '')}")
+                print(f"{p:>12} | {('YES' if r else 'no'):^13} | {dt:>10.4f} | {now-t_start:>12.3f} | "
+                      f"{ll.mersenne_digits(p) if r else '':>8} | {'yes' if p in known else ('NEW?!' if r else '')}", flush=True)
+            if a.progress and now - last_prog >= a.progress:
+                print(f"    ... {done}/{len(exps)} done, {len(hits)} hits, {now-t_start:.0f} s elapsed", file=sys.stderr, flush=True)
+                last_prog = now
     total = time.perf_counter() - t_start
     hits.sort()
-    print("-" * len(hdr))
+    print("-" * len(hdr), flush=True)
     print(f"tested {len(exps)} exponents in {total:.3f} s wall, {sum(r['ll_s'] for r in rows):.3f} s of LL work, "
           f"{len(hits)} Mersenne primes: {hits}")
     missing = [p for p in known if p <= max(exps) and p not in hits and p >= min(exps)]
