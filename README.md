@@ -81,6 +81,16 @@ tests near p = 20,000 run 11x faster on sixteen threads than serially on 3.14t. 
 recorded "reasonable time" for the first 200,000 whole numbers on a 12-core server; that range
 is now a few minutes.
 
+`-r 100001` (9592 exponents, 28 Mersenne primes), free-threaded 3.14.7t, threads, `--split 0`:
+
+| host | threads | wall |
+|---|---|---|
+| Xeon w5-3435X, 16 cores / 32 threads, 3.4 GHz base | 32 | 1526.7 s |
+| Xeon Platinum 8480+ (Sapphire Rapids), 2.0 GHz base | 128 | 337 s |
+
+The 8480+ does p = 44,497 in 1.55 s on one thread against 2.9 s on the w5, but a 128-thread run
+slows every test 1.57x (SMT siblings and all-core clocks), so the 4x thread count buys 4.5x.
+
 ## Splitting one test across threads (`--split`)
 
 GMP multiplies on one thread, so a run's tail, the last few huge exponents, used to leave the
