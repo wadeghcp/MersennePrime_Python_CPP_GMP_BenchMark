@@ -4,7 +4,7 @@
 #   make clean
 PYTHON  ?= python3
 CXX     ?= g++
-CXXFLAGS ?= -O3 -march=native -std=c++17 -fPIC -fvisibility=hidden -Wall
+CXXFLAGS ?= -O3 -march=native -std=c++17 -fPIC -fvisibility=hidden -Wall -pthread
 PYINC   := $(shell $(PYTHON) -m pybind11 --includes)
 EXT     := $(shell $(PYTHON) -c "import sysconfig;print(sysconfig.get_config_var('EXT_SUFFIX'))")
 TARGET  := lucaslehmer$(EXT)

@@ -21,3 +21,9 @@ def test_digits():
 def test_compat_class():
     c = ll.LucasLehmer(); out = []
     assert c.sa_lucaslehmer(31, 4) is True and c.sa_getListOfPrimes(out, 2, 10) is True and out == [2, 3, 5, 7]
+
+
+def test_split_matches_plain():
+    for d in (1, 2):
+        assert [p for p in ll.primes(2, 4423) if ll.lucas_lehmer_split(p, d)] == KNOWN
+        assert not ll.lucas_lehmer_split(4425, d)

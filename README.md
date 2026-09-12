@@ -51,6 +51,9 @@ make PYTHON=.venv/bin/python
 ## Run
 
 ```
+PerfNumMultiCLL.py -t 32 -r 100001         # ordered output, blocks every 3 s, big exponents split 3-way
+PerfNumMultiCLL.py -t 32 -r 100001 --split 2 --gap 5
+PerfNumMultiCLL.py -t 32 -r 100001 --order done --split 0   # completion order, plain GMP everywhere
 PerfNumMultiCLL.py -t 16 -r 10001          # every prime p <= 10001 on 16 workers
 PerfNumMultiCLL.py -p 11213                # one exponent
 PerfNumMultiCLL.py -l 521 607 1279         # a list
@@ -77,6 +80,26 @@ what the free-threaded build removes is the serialisation of everything around i
 tests near p = 20,000 run 11x faster on sixteen threads than serially on 3.14t. The 2018 README
 recorded "reasonable time" for the first 200,000 whole numbers on a 12-core server; that range
 is now a few minutes.
+
+## Splitting one test across threads (`--split`)
+
+GMP multiplies on one thread, so a run's tail, the last few huge exponents, used to leave the
+machine idle. `lucas_lehmer_split(p, depth)` squares by Karatsuba on halves: with s = a·2^k + b,
+s² = a²·2^2k + 2ab·2^k + b² and 2ab = (a+b)² − a² − b², three independent half-size squarings on
+three threads (depth 1) or nine quarter-size ones on nine (depth 2), then the same shift-and-add
+reduction modulo 2^p − 1. Persistent workers with a spinning barrier keep the per-iteration cost
+near a microsecond, which matters because a 100 kbit squaring is itself only ~100 µs.
+
+| one test | plain | `--split 1`, 3 threads | `--split 2`, 9 threads |
+|---|---|---|---|
+| p = 44,497 | 1.32 s | 0.83 s (1.58x) | 0.71 s (1.87x) |
+| p = 86,243 | 6.58 s | 3.71 s (1.78x) | 2.70 s (2.44x) |
+| p = 110,503 | 11.54 s | 6.49 s (1.78x) | 4.49 s (2.57x) |
+
+The driver runs the largest quarter of the exponents on a reserved pool with split tests,
+largest first, and the rest on plain threads walking up from the bottom so the ordered output
+starts immediately (`--big-share`, `--split 0` to compare with the single-threaded tail).
+`lucaslehmer.bench_square(bits, iters, depth)` measures one squaring at any size.
 
 `AnalyzeKnown.py` plots ratios between successive known exponents (needs numpy, matplotlib,
 scipy, natsort: `pip install .[analyze]`).

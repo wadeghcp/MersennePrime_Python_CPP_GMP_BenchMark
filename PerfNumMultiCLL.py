@@ -29,10 +29,12 @@ def known_exponents():
         return set()
 
 
-def test_one(p):
+def test_one(p, depth=0):
     t0 = time.perf_counter()
-    r = ll.lucas_lehmer(p)
+    r = ll.lucas_lehmer_split(p, depth) if depth else ll.lucas_lehmer(p)
     return p, r, time.perf_counter() - t0
+
+SPLIT_THREADS = {0: 1, 1: 3, 2: 9}   # threads one test uses at each split depth
 
 
 def main(argv=None):
@@ -50,6 +52,12 @@ def main(argv=None):
     ap.add_argument("--order", choices=("sorted", "done"), default="sorted",
                     help="sorted (default): results stream out in ascending p, each printed as soon as every smaller "
                          "exponent has finished; done: print in completion order, whatever finishes first")
+    ap.add_argument("--split", type=int, choices=(0, 1, 2), default=1,
+                    help="threads per test for the LARGEST exponents: 0 = plain GMP (1 thread), 1 = 3 threads, "
+                         "2 = 9 threads (default 1). The big exponents run on a reserved pool with this many "
+                         "threads each, so the tail of a run keeps the machine busy instead of going single-threaded.")
+    ap.add_argument("--big-share", type=float, default=0.25, metavar="FRAC",
+                    help="fraction of exponents (the largest) treated as big and run split on the reserved pool")
     ap.add_argument("--gap", type=float, default=3.0, metavar="SEC",
                     help="sorted mode: coalesce output into blocks, flushing a block once it is SEC seconds old "
                          "or 200 lines long (0 = print each line immediately)")
@@ -78,15 +86,32 @@ def main(argv=None):
                 f"{ll.mersenne_digits(p) if r else '':>8} | {'yes' if p in known else ('NEW?!' if r else '')}")
 
     ordered = a.order == "sorted"
-    # sorted mode submits SMALLEST first so the in-order frontier advances immediately; done mode
-    # submits largest first for the best load balance at the tail.
-    submit_order = sorted(exps) if ordered else sorted(exps, reverse=True)
-    results = {}                     # p -> (r, dt, at)   completed, not yet printed (sorted mode)
-    frontier = 0                     # index into sorted(exps) of the next exponent to print
     exps_sorted = sorted(exps)
+    # Level 1 + 2 scheduling: the largest --big-share of the exponents go to a "big" pool where each
+    # test is itself split over SPLIT_THREADS[--split] threads and starts LARGEST FIRST; everything
+    # else goes to a "small" pool of plain tests that walks up from the bottom so the in-order
+    # frontier advances at once. Both pools feed one result stream.
+    per = SPLIT_THREADS[a.split]
+    nbig = int(len(exps_sorted) * a.big_share) if (a.split and len(exps_sorted) >= 8) else 0
+    big = exps_sorted[len(exps_sorted) - nbig:] if nbig else []
+    small = exps_sorted[:len(exps_sorted) - nbig]
+    small_threads = max(1, min(len(small), a.threads // 8 if big else a.threads))
+    big_workers = max(1, (a.threads - small_threads) // per) if big else 0
+    if big:
+        print(f"scheduling: {len(small)} small exponents on {small_threads} plain threads (ascending); "
+              f"{len(big)} big exponents (p >= {big[0]}) on {big_workers} slots x {per} threads each (descending)", flush=True)
+    results = {}                     # p -> (r, dt, at)   completed, not yet printed (sorted mode)
+    frontier = 0                     # index into exps_sorted of the next exponent to print
     block = []; block_born = None
-    with Ex(max_workers=a.threads) as ex:
-        futs = [ex.submit(test_one, p) for p in submit_order]
+    pools = []
+    Ex = ThreadPoolExecutor if a.workers == "threads" else ProcessPoolExecutor
+    futs = []
+    if big:
+        pb = Ex(max_workers=big_workers); pools.append(pb)
+        futs += [pb.submit(test_one, p, a.split) for p in sorted(big, reverse=True)]
+    ps_ = Ex(max_workers=small_threads); pools.append(ps_)
+    futs += [ps_.submit(test_one, p, 0) for p in (small if ordered else sorted(small, reverse=True))]
+    try:
         for f in as_completed(futs):
             p, r, dt = f.result(); done += 1
             now = time.perf_counter(); at = now - t_start
@@ -96,7 +121,6 @@ def main(argv=None):
                 if r or a.all: print(line(p, r, dt, at), flush=True)
             else:
                 results[p] = (r, dt, at)
-                # advance the frontier over everything that is now in order
                 while frontier < len(exps_sorted) and exps_sorted[frontier] in results:
                     q = exps_sorted[frontier]; rq, dq, aq = results.pop(q); frontier += 1
                     if rq or a.all:
@@ -108,14 +132,14 @@ def main(argv=None):
                 print(f"    ... {done}/{len(exps)} done, {len(hits)} hits, {now-t_start:.0f} s elapsed"
                       + (f", next in order: p={exps_sorted[frontier]}" if ordered and frontier < len(exps_sorted) else ""),
                       file=sys.stderr, flush=True); last_prog = now
-            # coalescing: a block is flushed once its oldest line is --gap seconds old
             if ordered and block and a.gap and now - block_born >= a.gap:
                 print("\n".join(block), flush=True); block = []
-        # the executor drains here; everything is in results -> flush in order
-        while ordered and frontier < len(exps_sorted):
-            q = exps_sorted[frontier]; rq, dq, aq = results.pop(q); frontier += 1
-            if rq or a.all: block.append(line(q, rq, dq, aq))
-        if block: print("\n".join(block), flush=True)
+    finally:
+        for pl in pools: pl.shutdown(wait=True)
+    while ordered and frontier < len(exps_sorted):
+        q = exps_sorted[frontier]; rq, dq, aq = results.pop(q); frontier += 1
+        if rq or a.all: block.append(line(q, rq, dq, aq))
+    if block: print("\n".join(block), flush=True)
     total = time.perf_counter() - t_start
     hits.sort()
     print("-" * len(hdr), flush=True)
@@ -126,7 +150,7 @@ def main(argv=None):
     if a.json:
         with open(a.json, "w") as f:
             json.dump({"python": sys.version.split()[0], "gil": gil, "gmp": ll.gmp_version, "workers": a.threads,
-                       "executor": a.workers, "wall_s": round(total, 3), "hits": hits, "rows": rows}, f, indent=1)
+                       "executor": a.workers, "split": a.split, "order": a.order, "wall_s": round(total, 3), "hits": hits, "rows": rows}, f, indent=1)
     return 0 if not missing else 2
 
 
