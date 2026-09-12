@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=68", "pybind11>=2.13"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lucaslehmer"
+version = "2.0.0"
+description = "Lucas-Lehmer Mersenne prime test on GMP with a Python 3 (free-threading ready) binding"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.9"
+authors = [{name = "Wade Stone"}]
+dependencies = []
+
+[project.optional-dependencies]
+analyze = ["numpy", "matplotlib", "scipy", "natsort"]
+test = ["pytest"]

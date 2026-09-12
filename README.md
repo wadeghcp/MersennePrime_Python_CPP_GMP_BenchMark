@@ -1,198 +1,90 @@
 # MersennePrime_Python_CPP_GMP_BenchMark
-A Mersenne Prime finder Python app that wraps a C++ solver that uses ultra-extended precision arithmetic from libgmp library and implements the Lucas-Lehmer algo.  The Python block breaks the job into tasks over a user specified number of threads.
 
-Mersenne Primes have the format: MP = 2^p - 1, where p is a standard prime number.  Not all p result in a Mersenne.  Lucas/Lehmer discovered an efficient test for MP-ness.  The MP's grow quickly to have huge numbers of digits.  
+A Mersenne-prime finder and a quick, honest machine benchmark: a Python 3 driver that spreads
+Lucas-Lehmer tests over N workers, wrapping a small C++ core on the GNU Multiple Precision
+library (GMP). Originally written 2015-2018 for Python 2.7; ported in 2026 to Python 3.9+
+including the **free-threaded CPython 3.14t** build, where the worker threads run truly in
+parallel because the C++ test releases the GIL.
 
-The largest prime number discoveries have been Mersenne's.  There are 50 known to date.  The latest: On Dec. 26, 2017, Jonathon Pace published his discovery of a 50th Mersenne prime, 2^77,232,917 − 1, having 23,249,425 digits.  He used the globally available GIMP network to perform his searches.  More about them here: https://en.wikipedia.org/wiki/Mersenne_prime.
+Mersenne primes have the form M_p = 2^p - 1 with p prime. Lucas-Lehmer decides M_p's primality
+in p-2 squarings modulo M_p, which is where all the time goes; GMP's FFT multiplication is what
+makes it feasible. 52 Mersenne primes are known as of 2026 (`known_mp_list.txt`); the largest,
+2^136,279,841 - 1, has 41 million digits and was found by GIMPS in October 2024.
 
-Python by default can handle arbitrary integer size.  C/C++'s std lib can't nominally handle larger than quad precision, but the Gnu Multi-Precision library is designed to handle arbritrary precision arithmetic.  Clever algorithms allow realizable performance for what would otherwise be order-polynomial complexity.  For example, sqr(N) performance for multiplications.  An example of the cleverness: FFT's are used above a user configurable threshold of digits to perform a multiplication.
+## What changed in the 2026 port
 
-Mine is a simple design that was started with Python in an exploration of "perfect numbers" - associated with Mersenne's as described in the provided reference's references.  Performance enhancement with replacement of the MP-test using the GMP lib allowed the Mersenne search in this case to grow from testing p's in the range of the first 10,000 whole numbers with Python, in reasonable time, to a range of the first 200,000 in reasonable time on my 12 core linux server.  I now use this framework to do a quick and dirty personal benchmark with a known multiprocessing algorithm when evaluating a new machine.  The work could relatively quickly be extended to an arbitrary number of servers - but the infrastructure and the fact that without special configuration, a single Mersenne test needs to be contained entirely within one thread - finally limits the performance.  
+| | 2018 | 2026 |
+|---|---|---|
+| Python | 2.7 | 3.9+, tested on 3.12 and free-threaded 3.14.7t |
+| binding | PyBindGen, `PyObject*` in/out, big ints round-tripped as decimal strings | pybind11, plain C++ (`unsigned long` in, `bool` out), GIL released in the loop |
+| big ints | boost::multiprecision over GMP | `gmp.h` directly |
+| mod 2^p-1 | `mpz_mod` | shift-and-add reduction (same result, cheaper) |
+| prime sieve | O(n^2)-ish vector-erase loop | sieve of Eratosthenes |
+| parallelism | `multiprocessing.Process` per exponent | `ThreadPoolExecutor` (default) or `ProcessPoolExecutor` |
+| build | hand Makefile against `/usr/include/python2.7` | `make` for the Python on your PATH, or `pip install .` |
+| licence | none | MIT |
 
-As a side note: The GIMP network has been tweaked for many years to yield the fastest performance.  I've considered what could be gained with the use of FPGA's - I think that's been considered elsewhere, too.  I think significant gains could be made - again, using some clever fast algorithms to perform the test.
+The 2018 sources are kept under `legacy/` for reference. A thin `LucasLehmer` class with the old
+method names is still exported for anyone who imported it.
 
-I chose PyBindGen as my wrapper interface API for the C extension instead of Boost Python.  BP doesn't allow arbitrary precision arithmetic - or didn't, as of 2013, when I was deciding.  PyBindGen is simple and met the needs and it led to a quick decision without evaluating any of the other candidate interfaces that could potentially do the same thing.
+## Build
 
-Potential Improvements:
+Requires a C++17 compiler, GMP headers (`libgmp-dev` on Debian/Ubuntu), and `pybind11`.
 
- - I believe I could make my own version faster on my server - I spent only a low to moderate amount of time optimizing it using /usr/bin/perf.  The bottleneck is in the the Lucas-Lehmer calculation - specifically the multiplication (~35% of the time is spent in this on GMP API call doing the squaring in the equation: s = (sqr(s) - 2) % M, where M = 2^p -1.  This is executed p - 2 times for each tested p value.  There's no good way to memoize or pre-calculate general (independent of M) values to be used in the equation - the growth of s without the mod M portion is extreme - beyond the realm of storage bitwise in any earth-bound compute system and quickly far surpassing the huge value of M - thus requiring M for the calculation.  Note that the newest largest M is found with p = 77,232,917.  My server can't approach the reproduction of this one, or anything reasonably above p = 5 million or so.
+```sh
+python3 -m pip install pybind11            # once, into the interpreter you will use
+make                                       # -> lucaslehmer.<abi>.so beside the sources
+make test                                  # pytest
+# or, as a package:
+pip install .
+```
 
-- Due to the need so far to perform the LL loop single-threaded, I could also achieve significant performance gains by using one of the newest Xeon processors with relatively huge last-level cache operating overclocked.  A sea of such things would probably enable my algorithm to make a realistic attempt to tackle a new record.  A sea of such entities would require a flood of money, too (I prefer to avoid the reputed ease of using GIMP - I haven't tried it).
- 
- - I could also use matplotlib to explore potential correlations between the resulting prime numbers and most importantly, the p - 2 intermediate steps in the lucas-lehmer algorithm.  I'm certain that has been beaten to death over the years in order to find some way to narrow the search and the numerical processing, but I'd like to see it for myself.
- 
- - I could convert the python2.7 to python3, but that is non-trivial and isn't just as simple as running 2to3.  The C-api conversions in this case will require a moderate and fully manual effort.
+For the free-threaded interpreter with [uv](https://docs.astral.sh/uv/):
 
-Required:
+```sh
+uv python install 3.14t
+uv venv --python 3.14t .venv && uv pip install pybind11 pytest
+make PYTHON=.venv/bin/python
+.venv/bin/python -c "import sys; print(sys._is_gil_enabled())"   # False
+```
 
-	o Linux OS - latest: Fedora 27
+## Run
 
-	o g++: latest: 7.3.1
+```
+PerfNumMultiCLL.py -t 16 -r 10001          # every prime p <= 10001 on 16 workers
+PerfNumMultiCLL.py -p 11213                # one exponent
+PerfNumMultiCLL.py -l 521 607 1279         # a list
+PerfNumMultiCLL.py -n 2 10001              # just count primes in a range (1229)
+PerfNumMultiCLL.py -r 10001 --workers processes --json run.json
+```
 
-	o libgmpxx.so: latest 6.1.2, can be gotten at: https://gmplib.org
+Output is a table of the Mersenne hits (add `--all` for every exponent), the Lucas-Lehmer time
+per exponent, and a wall-clock total; the exit status is 2 if a known Mersenne exponent in the
+range was missed, which makes the run its own correctness check.
 
-	o Python2.7
+## Measured on the port's development box
 
-	o PyBindGen: tested with 0.18.0 and up, can be gotten at: https://pypi.python.org/pypi/PyBindGen
+Xeon w5-3435X, GMP 6.3.0, g++ 13.3, `-r 10001` (1229 exponents, 22 Mersenne primes):
 
-PerfNumMultiCLL.py -h gives:
+| interpreter | workers | wall |
+|---|---|---|
+| 3.14.7 free-threaded, 16 threads | threads | 0.79 s |
+| 3.14.7 free-threaded, 16 processes | processes | 0.87 s |
+| 3.12.3 (GIL), 16 threads | threads | 0.79 s |
 
-        usage: PerfNumMultiCLL.py [-h] [-t THREADS]
-                                  [-r PRIME_RANGE | -p PRIME_VALUE | -l PRIME_LIST [PRIME_LIST ...]
-                                  | -n RETURN_NUM_PRIMES_IN_RANGE]
+The GIL build keeps up because the extension releases the GIL for the whole Lucas-Lehmer loop;
+what the free-threaded build removes is the serialisation of everything around it. Sixteen
+tests near p = 20,000 run 11x faster on sixteen threads than serially on 3.14t. The 2018 README
+recorded "reasonable time" for the first 200,000 whole numbers on a 12-core server; that range
+is now a few minutes.
 
-        optional arguments:
-          -h, --help            show this help message and exit
-          -t THREADS, --threads THREADS
-                                Number of threads
-          -r PRIME_RANGE, --prime_range PRIME_RANGE
-                                Range of primes to search starting with 1 to this
-                                number
-          -p PRIME_VALUE, --prime_value PRIME_VALUE
-                                A specific prime value to test
-          -l PRIME_LIST [PRIME_LIST ...], --prime_list PRIME_LIST [PRIME_LIST ...]
-                                A space separated list of specific primes to test
-          -n RETURN_NUM_PRIMES_IN_RANGE, --return_num_primes_in_range RETURN_NUM_PRIMES_IN_RANGE
-                                Return the number of standard primes from 2 to the
-                                given value
-			
-1) To build and test on 10 worker threads over the primes found in the first 10,001 whole numbers on a single command line:
+`AnalyzeKnown.py` plots ratios between successive known exponents (needs numpy, matplotlib,
+scipy, natsort: `pip install .[analyze]`).
 
-$  bash -p -c "gmake clean && gmake" && bash -c 'PerfNumMultiCLL.py -t 10 -r 10001'
+## Notes kept from 2018
 
-rm -f lucaslehmerpy_bind.cpp liblucaslehmerpy.so lucaslehmerpy.o lucaslehmerpy_bind.o lucaslehmer.so
-
-Clean done
-
-PYTHONPATH=:./ python lucaslehmerBind.py > lucaslehmerpy_bind.cpp
-
-g++ -g -O3 -w -fPIC -frecord-gcc-switches -I/usr/include/python2.7 -std=c++14 -c -o lucaslehmerpy.o lucaslehmerpy.cpp
-
-g++ -shared -fPIC -g -O3 -rdynamic -Wl,-rpath -Wl,/home/wade/Dev/Python/MersennePrime_Python_CPP_GMP_BenchMark -Wl,-rpath -Wl,/usr/lib/x86_64-linux-gnu -lgmpxx -lgmp -o liblucaslehmerpy.so lucaslehmerpy.o
-
-g++ -g -O3 -w -fPIC -frecord-gcc-switches -I/usr/include/python2.7 -std=c++14 -c -o lucaslehmerpy_bind.o lucaslehmerpy_bind.cpp
-
-g++ -o lucaslehmer.so lucaslehmerpy_bind.o -shared -fPIC -g -O3 -rdynamic -Wl,-rpath -Wl,/home/wade/Dev/Python/MersennePrime_Python_CPP_GMP_BenchMark -Wl,-rpath -Wl,/usr/lib/x86_64-linux-gnu -L. -llucaslehmerpy -lgmpxx -lgmp
-
-Build done
-  
-Total number of primes in set: 1229
-
-  		----------------------------------------------------------------------------------------------
-  		|         Tested Value         |      Time From App Start     |     Elapsed Time To Calc     |
-  		----------------------------------------------------------------------------------------------
-  		|                        3     |                 0.077552     |                 0.000394     |
-		----------------------------------------------------------------------------------------------
-  		|                        5     |                 0.081690     |                 0.000554     |
-		----------------------------------------------------------------------------------------------
-  		|                        7     |                 0.085645     |                 0.000324     |
-		----------------------------------------------------------------------------------------------
-  		|                       13     |                 0.093307     |                 0.000679     |
-		----------------------------------------------------------------------------------------------
-  		|                       17     |                 0.098780     |                 0.000438     |
-		----------------------------------------------------------------------------------------------
-  		|                       19     |                 0.105030     |                 0.000565     |
-		----------------------------------------------------------------------------------------------
-  		|                       31     |                 0.124716     |                 0.000709     |
-		----------------------------------------------------------------------------------------------
-  		|                       61     |                 0.173454     |                 0.000433     |
-		----------------------------------------------------------------------------------------------
-  		|                       89     |                 0.236665     |                 0.000402     |
-		----------------------------------------------------------------------------------------------
-  		|                      107     |                 0.275323     |                 0.000272     |
-		----------------------------------------------------------------------------------------------
-  		|                      127     |                 0.308952     |                 0.000434     |
-		----------------------------------------------------------------------------------------------
-  		|                      521     |                 0.727131     |                 0.000722     |
-		----------------------------------------------------------------------------------------------
-  		|                      607     |                 0.792134     |                 0.000773     |
-		----------------------------------------------------------------------------------------------
-  		|                     1279     |                 1.259954     |                 0.002469     |
-		----------------------------------------------------------------------------------------------
-  		|                     2203     |                 1.790522     |                 0.009780     |
-		----------------------------------------------------------------------------------------------
-  		|                     2281     |                 1.889030     |                 0.006947     |
-		----------------------------------------------------------------------------------------------
-  		|                     3217     |                 2.648756     |                 0.021875     |
-		----------------------------------------------------------------------------------------------
-  		|                     4253     |                 4.200098     |                 0.035039     |
-		----------------------------------------------------------------------------------------------
-  		|                     4423     |                12.537035     |                 0.059899     |
-		----------------------------------------------------------------------------------------------
-  		|                     9689     |                20.587355     |                 0.462537     |
-		----------------------------------------------------------------------------------------------
-  		|                     9941     |                22.196429     |                 0.497361     |
-		----------------------------------------------------------------------------------------------
-
-
-
-2) To then run the case of reproducing as many of the 50 known Mersenne Primes in 2 mins, you would do the following and get the subsequent result:
-
-$  timeout -s SIGINT 120s PerfNumMultiCLL.py -t 10 -l $(cat known_mp_list.txt | tr '\n' ' ')
-  
-Total number of values to test in set: 47
-
-  		----------------------------------------------------------------------------------------------
-  		|         Tested Value         |      Time From App Start     |     Elapsed Time To Calc     |
-  		----------------------------------------------------------------------------------------------
-  		|                        3     |                 0.025677     |                 0.000355     |
-		----------------------------------------------------------------------------------------------
-  		|                        5     |                 0.030043     |                 0.000197     |
-		----------------------------------------------------------------------------------------------
-  		|                        7     |                 0.043573     |                 0.000457     |
-		----------------------------------------------------------------------------------------------
-  		|                       13     |                 0.055922     |                 0.000327     |
-		----------------------------------------------------------------------------------------------
-  		|                       17     |                 0.061132     |                 0.000504     |
-		----------------------------------------------------------------------------------------------
-  		|                       19     |                 0.066268     |                 0.000432     |
-		----------------------------------------------------------------------------------------------
-  		|                       61     |                 0.073579     |                 0.000591     |
-		----------------------------------------------------------------------------------------------
-  		|                      107     |                 0.079775     |                 0.000450     |
-		----------------------------------------------------------------------------------------------
-  		|                       89     |                 0.084976     |                 0.000305     |
-		----------------------------------------------------------------------------------------------
-  		|                      127     |                 0.094240     |                 0.000773     |
-		----------------------------------------------------------------------------------------------
-  		|                      521     |                 0.102225     |                 0.001041     |
-		----------------------------------------------------------------------------------------------
-  		|                      607     |                 0.107375     |                 0.000567     |
-		----------------------------------------------------------------------------------------------
-  		|                     1279     |                 0.114181     |                 0.002030     |
-		----------------------------------------------------------------------------------------------
-  		|                       31     |                 0.119691     |                 0.000408     |
-		----------------------------------------------------------------------------------------------
-  		|                     2203     |                 0.123170     |                 0.006910     |
-		----------------------------------------------------------------------------------------------
-  		|                     2281     |                 0.131885     |                 0.008673     |
-		----------------------------------------------------------------------------------------------
-  		|                     3217     |                 0.147968     |                 0.020942     |
-		----------------------------------------------------------------------------------------------
-  		|                     4423     |                 0.175509     |                 0.041126     |
-		----------------------------------------------------------------------------------------------
-  		|                     4253     |                 0.184482     |                 0.051553     |
-		----------------------------------------------------------------------------------------------
-  		|                     9941     |                 0.635446     |                 0.495023     |
-		----------------------------------------------------------------------------------------------
-  		|                    11213     |                 0.882603     |                 0.741126     |
-		----------------------------------------------------------------------------------------------
-  		|                    19937     |                 3.273970     |                 3.125011     |
-		----------------------------------------------------------------------------------------------
-  		|                    21701     |                 3.917314     |                 3.766983     |
-		----------------------------------------------------------------------------------------------
-  		|                    23209     |                 4.573598     |                 4.401419     |
-		----------------------------------------------------------------------------------------------
-  		|                    44497     |                23.559502     |                23.370437     |
-		----------------------------------------------------------------------------------------------
-  Killed by ctrl-C
-
-3) To explore and test a particular value of p, you could run:
-
-$  PerfNumMultiCLL.py -t 10 -p 44497
-
-  		----------------------------------------------------------------------------------------------
-  		|         Tested Value         |      Time From App Start     |     Elapsed Time To Calc     |
-  		----------------------------------------------------------------------------------------------
-  		|                    44497     |                14.221298     |                14.198381     |
-		----------------------------------------------------------------------------------------------
+The bottleneck is the squaring inside Lucas-Lehmer, executed p-2 times per exponent; there is
+no memoisation across exponents because the intermediate values are as large as M_p itself. A
+single test is inherently single-threaded; parallelism is across exponents. FPGA and huge-cache
+Xeon speculation from the original README stands as written; GIMPS remains the tool that
+actually finds records.

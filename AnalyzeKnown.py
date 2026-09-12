@@ -14,7 +14,6 @@ import struct
 import shutil
 import subprocess
 import shlex
-import pipes
 import zlib
 import inspect
 import re
@@ -34,10 +33,7 @@ from collections import Counter
 from natsort import natsorted
 
 
-KNOWN_FILE = os.path.join(os.getenv("HOME"),
-                          "Dev/Python/MersennePrime_Python_CPP_GMP_BenchMark",
-                          "known_mp_list.txt"
-)
+KNOWN_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "known_mp_list.txt")
 
 def addArgs():
     p = argparse.ArgumentParser()

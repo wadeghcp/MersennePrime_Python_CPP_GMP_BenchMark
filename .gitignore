@@ -1,6 +1,9 @@
-liblucaslehmerpy.so
-lucaslehmer.so
-lucaslehmerpy.o
-lucaslehmerpy_bind.cpp
-lucaslehmerpy_bind.o
-test/
+*.so
+*.o
+__pycache__/
+.venv*/
+build/
+dist/
+*.egg-info/
+*.json
+!known_mp_list.txt
