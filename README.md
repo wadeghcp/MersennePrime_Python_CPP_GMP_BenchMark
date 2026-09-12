@@ -51,7 +51,7 @@ make PYTHON=.venv/bin/python
 ## Run
 
 ```
-PerfNumMultiCLL.py -t 32 -r 100001         # ordered output, blocks every 3 s, big exponents split 3-way
+PerfNumMultiCLL.py -t 32 -r 100001         # ordered output, blocks every 3 s, tail tests split when cores go idle
 PerfNumMultiCLL.py -t 32 -r 100001 --split 2 --gap 5
 PerfNumMultiCLL.py -t 32 -r 100001 --order done --split 0   # completion order, plain GMP everywhere
 PerfNumMultiCLL.py -t 16 -r 10001          # every prime p <= 10001 on 16 workers
@@ -96,9 +96,14 @@ near a microsecond, which matters because a 100 kbit squaring is itself only ~10
 | p = 86,243 | 6.58 s | 3.71 s (1.78x) | 2.70 s (2.44x) |
 | p = 110,503 | 11.54 s | 6.49 s (1.78x) | 4.49 s (2.57x) |
 
-The driver runs the largest quarter of the exponents on a reserved pool with split tests,
-largest first, and the rest on plain threads walking up from the bottom so the ordered output
-starts immediately (`--big-share`, `--split 0` to compare with the single-threaded tail).
+A split thread does less useful work than a plain one (3-way is 59% efficient, 9-way 29%), so
+the driver never splits while the queue is deep: every test starts on one thread. Only when
+fewer unstarted exponents remain than a third of the threads do new tests take 3 threads, and
+under a ninth, 9, so idle cores are folded into the tail without oversubscribing. `--split`
+caps that depth (default 2, `--split 0` never splits). On a range like `-r 100001` the tail is
+under 5% of the wall and the split is worth a few seconds at most: more cores, not more split.
+Split pays when one exponent dominates, p in the millions, or when a handful of exponents run
+on a big machine.
 `lucaslehmer.bench_square(bits, iters, depth)` measures one squaring at any size.
 
 `AnalyzeKnown.py` plots ratios between successive known exponents (needs numpy, matplotlib,

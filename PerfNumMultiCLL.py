@@ -52,12 +52,11 @@ def main(argv=None):
     ap.add_argument("--order", choices=("sorted", "done"), default="sorted",
                     help="sorted (default): results stream out in ascending p, each printed as soon as every smaller "
                          "exponent has finished; done: print in completion order, whatever finishes first")
-    ap.add_argument("--split", type=int, choices=(0, 1, 2), default=1,
-                    help="threads per test for the LARGEST exponents: 0 = plain GMP (1 thread), 1 = 3 threads, "
-                         "2 = 9 threads (default 1). The big exponents run on a reserved pool with this many "
-                         "threads each, so the tail of a run keeps the machine busy instead of going single-threaded.")
-    ap.add_argument("--big-share", type=float, default=0.25, metavar="FRAC",
-                    help="fraction of exponents (the largest) treated as big and run split on the reserved pool")
+    ap.add_argument("--split", type=int, choices=(0, 1, 2), default=2,
+                    help="MAX split depth used in the TAIL of a run: 0 = never split, 1 = up to 3 threads per test, "
+                         "2 = up to 9 (default). Every test starts plain while the queue is long; once fewer "
+                         "unstarted exponents remain than a third of the worker threads, idle threads are folded into the "
+                         "remaining tests as split threads. Nothing is reserved up front.")
     ap.add_argument("--gap", type=float, default=3.0, metavar="SEC",
                     help="sorted mode: coalesce output into blocks, flushing a block once it is SEC seconds old "
                          "or 200 lines long (0 = print each line immediately)")
@@ -87,31 +86,34 @@ def main(argv=None):
 
     ordered = a.order == "sorted"
     exps_sorted = sorted(exps)
-    # Level 1 + 2 scheduling: the largest --big-share of the exponents go to a "big" pool where each
-    # test is itself split over SPLIT_THREADS[--split] threads and starts LARGEST FIRST; everything
-    # else goes to a "small" pool of plain tests that walks up from the bottom so the in-order
-    # frontier advances at once. Both pools feed one result stream.
-    per = SPLIT_THREADS[a.split]
-    nbig = int(len(exps_sorted) * a.big_share) if (a.split and len(exps_sorted) >= 8) else 0
-    big = exps_sorted[len(exps_sorted) - nbig:] if nbig else []
-    small = exps_sorted[:len(exps_sorted) - nbig]
-    small_threads = max(1, min(len(small), a.threads // 8 if big else a.threads))
-    big_workers = max(1, (a.threads - small_threads) // per) if big else 0
-    if big:
-        print(f"scheduling: {len(small)} small exponents on {small_threads} plain threads (ascending); "
-              f"{len(big)} big exponents (p >= {big[0]}) on {big_workers} slots x {per} threads each (descending)", flush=True)
+    # Tail-adaptive split: ONE pool of a.threads plain workers, every test starts on one thread
+    # while the unstarted queue is deep (that is where throughput lives: a plain thread is 100%
+    # efficient, a 3-way split 59%, a 9-way split 29%). When fewer unstarted exponents remain
+    # than threads, the idle threads would go to waste, so tests that start from then on take
+    # split threads: depth 1 when remaining*3 <= threads, depth 2 when remaining*9 <= threads,
+    # so the split threads never oversubscribe the cores.
+    import threading
+    remaining = [len(exps)]; rlock = threading.Lock()
+    def run_adaptive(p):
+        with rlock:
+            remaining[0] -= 1; left = remaining[0]
+        depth = 0
+        if a.split >= 1 and left <= a.threads // 3: depth = 1
+        if a.split >= 2 and left <= max(1, a.threads // 9): depth = 2
+        return test_one(p, depth)
     results = {}                     # p -> (r, dt, at)   completed, not yet printed (sorted mode)
     frontier = 0                     # index into exps_sorted of the next exponent to print
     block = []; block_born = None
-    pools = []
     Ex = ThreadPoolExecutor if a.workers == "threads" else ProcessPoolExecutor
-    futs = []
-    if big:
-        pb = Ex(max_workers=big_workers); pools.append(pb)
-        futs += [pb.submit(test_one, p, a.split) for p in sorted(big, reverse=True)]
-    ps_ = Ex(max_workers=small_threads); pools.append(ps_)
-    futs += [ps_.submit(test_one, p, 0) for p in (small if ordered else sorted(small, reverse=True))]
-    try:
+    submit_order = exps_sorted if ordered else sorted(exps, reverse=True)
+    if a.workers == "processes":     # no shared counter across processes: split the last threads//2 by position
+        n = len(submit_order); cut1 = n - a.threads // 3; cut2 = n - max(1, a.threads // 9)
+        def depth_for(i): return 2 if (a.split >= 2 and i >= cut2) else (1 if (a.split >= 1 and i >= cut1) else 0)
+    with Ex(max_workers=a.threads) as ex:
+        if a.workers == "processes":
+            futs = [ex.submit(test_one, p, depth_for(i)) for i, p in enumerate(submit_order)]
+        else:
+            futs = [ex.submit(run_adaptive, p) for p in submit_order]
         for f in as_completed(futs):
             p, r, dt = f.result(); done += 1
             now = time.perf_counter(); at = now - t_start
@@ -134,8 +136,6 @@ def main(argv=None):
                       file=sys.stderr, flush=True); last_prog = now
             if ordered and block and a.gap and now - block_born >= a.gap:
                 print("\n".join(block), flush=True); block = []
-    finally:
-        for pl in pools: pl.shutdown(wait=True)
     while ordered and frontier < len(exps_sorted):
         q = exps_sorted[frontier]; rq, dq, aq = results.pop(q); frontier += 1
         if rq or a.all: block.append(line(q, rq, dq, aq))
