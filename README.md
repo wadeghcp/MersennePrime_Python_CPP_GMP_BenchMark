@@ -51,9 +51,9 @@ make PYTHON=.venv/bin/python
 ## Run
 
 ```
-PerfNumMultiCLL.py -t 32 -r 100001         # ordered output, blocks every 3 s, tail tests split when cores go idle
-PerfNumMultiCLL.py -t 32 -r 100001 --split 2 --gap 5
-PerfNumMultiCLL.py -t 32 -r 100001 --order done --split 0   # completion order, plain GMP everywhere
+PerfNumMultiCLL.py -t 32 -r 100001         # ordered output, blocks every 3 s, plain GMP on every thread
+PerfNumMultiCLL.py -t 32 -r 100001 --split 2 --gap 5   # tail tests split 9-way once cores go idle
+PerfNumMultiCLL.py -t 32 -r 100001 --order done   # completion order
 PerfNumMultiCLL.py -t 16 -r 10001          # every prime p <= 10001 on 16 workers
 PerfNumMultiCLL.py -p 11213                # one exponent
 PerfNumMultiCLL.py -l 521 607 1279         # a list
@@ -100,8 +100,9 @@ A split thread does less useful work than a plain one (3-way is 59% efficient, 9
 the driver never splits while the queue is deep: every test starts on one thread. Only when
 fewer unstarted exponents remain than a third of the threads do new tests take 3 threads, and
 under a ninth, 9, so idle cores are folded into the tail without oversubscribing. `--split`
-caps that depth (default 2, `--split 0` never splits). On a range like `-r 100001` the tail is
-under 5% of the wall and the split is worth a few seconds at most: more cores, not more split.
+caps that depth and defaults to 0 because on a range it measures as a wash: `-r 100001` on 32
+threads took 1526.7 s plain and 1540.8 s with `--split 2`, the tail being under 5% of the wall
+and the split's overhead eating what it recovers. More cores, not more split.
 Split pays when one exponent dominates, p in the millions, or when a handful of exponents run
 on a big machine.
 `lucaslehmer.bench_square(bits, iters, depth)` measures one squaring at any size.

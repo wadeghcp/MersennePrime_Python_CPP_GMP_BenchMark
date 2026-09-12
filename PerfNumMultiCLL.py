@@ -52,9 +52,9 @@ def main(argv=None):
     ap.add_argument("--order", choices=("sorted", "done"), default="sorted",
                     help="sorted (default): results stream out in ascending p, each printed as soon as every smaller "
                          "exponent has finished; done: print in completion order, whatever finishes first")
-    ap.add_argument("--split", type=int, choices=(0, 1, 2), default=2,
-                    help="MAX split depth used in the TAIL of a run: 0 = never split, 1 = up to 3 threads per test, "
-                         "2 = up to 9 (default). Every test starts plain while the queue is long; once fewer "
+    ap.add_argument("--split", type=int, choices=(0, 1, 2), default=0,
+                    help="MAX split depth used in the TAIL of a run: 0 = never split (default), 1 = up to 3 threads "
+                         "per test, 2 = up to 9. Measured: no gain on ranges; use for a few large exponents. Every test starts plain while the queue is long; once fewer "
                          "unstarted exponents remain than a third of the worker threads, idle threads are folded into the "
                          "remaining tests as split threads. Nothing is reserved up front.")
     ap.add_argument("--gap", type=float, default=3.0, metavar="SEC",
