@@ -195,7 +195,7 @@ static Tables make_tables(u64 N) {
 }
 
 // Run a batch of exponents that all share one transform length. Returns (p, is_prime, seconds) per test.
-static std::vector<std::tuple<u64, bool, double>> run_batch(const std::vector<u64>& ps, u64 N) {
+static std::vector<std::tuple<u64, bool, double, u64>> run_batch(const std::vector<u64>& ps, u64 N) {
     const size_t n = ps.size();
     Tables T = make_tables(N);
     // per-test weights
@@ -236,7 +236,7 @@ static std::vector<std::tuple<u64, bool, double>> run_batch(const std::vector<u6
     cudaFree(d_tw); cudaFree(d_w); cudaFree(d_wi); cudaFree(d_args); cudaFree(d_out); cudaFree(d_ns);
 
     // exact verdict: rebuild the residue with GMP and reduce mod 2^p - 1
-    std::vector<std::tuple<u64, bool, double>> res(n);
+    std::vector<std::tuple<u64, bool, double, u64>> res(n);
     mpz_t M, s, t; mpz_init(M); mpz_init(s); mpz_init(t);
     for (size_t i = 0; i < n; ++i) {
         u64 p = ps[i];
@@ -247,7 +247,7 @@ static std::vector<std::tuple<u64, bool, double>> run_batch(const std::vector<u6
             mpz_set_si(t, (long)x); mpz_mul_2exp(t, t, (j * p + N - 1) / N); mpz_add(s, s, t);
         }
         mpz_mod(s, s, M);
-        res[i] = {p, mpz_cmp_ui(s, 0) == 0, ns[i] / 1e9};
+        res[i] = {p, mpz_cmp_ui(s, 0) == 0, ns[i] / 1e9, (u64)mpz_get_ui(s)};   // res64 = low limb
     }
     mpz_clear(M); mpz_clear(s); mpz_clear(t);
     return res;
@@ -256,11 +256,11 @@ static std::vector<std::tuple<u64, bool, double>> run_batch(const std::vector<u6
 // Public entry: any list of exponents; grouped by transform length, each group one launch.
 // Exponents too small (< 64) or too large for the kernel are returned with is_prime = false and
 // seconds < 0 so the caller can redo them on the CPU.
-static std::vector<std::tuple<u64, bool, double>> lucas_lehmer_batch(std::vector<u64> ps) {
-    std::map<u64, std::vector<u64>> groups; std::vector<std::tuple<u64, bool, double>> res;
+static std::vector<std::tuple<u64, bool, double, u64>> lucas_lehmer_batch(std::vector<u64> ps) {
+    std::map<u64, std::vector<u64>> groups; std::vector<std::tuple<u64, bool, double, u64>> res;
     for (u64 p : ps) {
         u64 N = (p >= 64) ? ntt_length(p) : 0;
-        if (!N) res.emplace_back(p, false, -1.0); else groups[N].push_back(p);
+        if (!N) res.emplace_back(p, false, -1.0, 0ull); else groups[N].push_back(p);
     }
     for (auto& g : groups) { auto r = run_batch(g.second, g.first); res.insert(res.end(), r.begin(), r.end()); }
     return res;
@@ -274,7 +274,7 @@ static std::tuple<std::string, int, size_t> device_info() {
 PYBIND11_MODULE(lucaslehmer_cuda, m, py::mod_gil_not_used()) {
     m.doc() = "Lucas-Lehmer on CUDA: exact integer IBDWT in GF(2^64 - 2^32 + 1), one thread block per exponent";
     m.def("lucas_lehmer_batch", &lucas_lehmer_batch, py::arg("exponents"),
-          "[(p, is_prime, seconds)] for a list of exponents; seconds < 0 marks one the kernel cannot take (redo on CPU).");
+          "[(p, is_prime, seconds, res64)] for a list of exponents; seconds < 0 marks one the kernel cannot take (redo on CPU).");
     m.def("ntt_length", &ntt_length, py::arg("p"), "Transform length the kernel would use for p (0 = too large).");
     m.def("max_exponent", []() { return (u64)8192 * max_bits_per_word(8192); }, "Largest p this kernel handles.");
     m.def("device_info", &device_info, "(name, SM count, global memory bytes)");

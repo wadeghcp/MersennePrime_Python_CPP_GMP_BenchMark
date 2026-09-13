@@ -16,6 +16,14 @@
 
 namespace py = pybind11;
 
+// GIMPS-style res64: the low 64 bits of the final Lucas-Lehmer residue s_{p-2} mod 2^p - 1.
+// Zero for a prime, otherwise a fingerprint of the whole computation: any silent data corruption
+// in any of the p-2 squarings changes it, which is what makes a run self-checking against a
+// reference. Each engine stores it here (thread-local) and the *_res() bindings return it.
+static thread_local unsigned long long g_last_res64 = 0;
+static inline void note_res64(const mpz_t s) { g_last_res64 = mpz_get_ui(s); }   // low limb (64-bit GMP)
+
+
 // Lucas-Lehmer: M_p = 2^p - 1 is prime iff s_{p-2} == 0 with s_0 = 4, s_{k+1} = s_k^2 - 2 (mod M_p).
 // p must itself be prime for the test to mean anything; p == 2 is handled (M_2 = 3 is prime).
 static bool lucas_lehmer(unsigned long p) {
@@ -41,6 +49,7 @@ static bool lucas_lehmer(unsigned long p) {
             mpz_clear(hi);
         }
     }
+    note_res64(s);
     bool prime = (mpz_cmp_ui(s, 0) == 0);
     mpz_clear(M); mpz_clear(s);
     return prime;
@@ -161,6 +170,7 @@ static bool lucas_lehmer_split(unsigned long p, int depth) {
         for (auto& ln : lanes) { mpz_clear(ln.a); mpz_clear(ln.b); mpz_clear(ln.t1); mpz_clear(ln.t2); mpz_clear(ln.t3); }
         for (auto* q : sub) delete q;
     }
+    note_res64(s);
     bool prime = (mpz_cmp_ui(s, 0) == 0);
     mpz_clear(M); mpz_clear(s); mpz_clear(sq_); mpz_clear(a); mpz_clear(b); mpz_clear(t1); mpz_clear(t2); mpz_clear(t3);
     return prime;
@@ -305,6 +315,7 @@ static int lucas_lehmer_fft_raw(unsigned long p, double* err_out = nullptr) {
                 mpz_set_si(t, (long)x[j]); mpz_mul_2exp(t, t, (j * p + N - 1) / N); mpz_add(s, s, t);
             }
             mpz_mod(s, s, M);
+            note_res64(s);
             verdict = (mpz_cmp_ui(s, 0) == 0) ? 1 : 0;
             mpz_clear(M); mpz_clear(s); mpz_clear(t);
         }
@@ -339,6 +350,12 @@ PYBIND11_MODULE(lucaslehmer, m, py::mod_gil_not_used()) {
           "Lucas-Lehmer with the squaring split across threads: depth 1 = 3 threads, depth 2 = 9 threads.");
     m.def("lucas_lehmer_fft", &lucas_lehmer_fft, py::arg("p"),
           "Lucas-Lehmer on the floating-point IBDWT engine (FFT squaring, exact: falls back to GMP on rounding trouble).");
+    m.def("lucas_lehmer_res", [](unsigned long p) { bool r = lucas_lehmer(p); return std::make_pair(r, g_last_res64); }, py::arg("p"),
+          "(is_prime, res64) on the GMP engine: res64 = low 64 bits of the final residue, GIMPS style.");
+    m.def("lucas_lehmer_split_res", [](unsigned long p, int depth) { bool r = lucas_lehmer_split(p, depth); return std::make_pair(r, g_last_res64); },
+          py::arg("p"), py::arg("depth") = 1, "(is_prime, res64) on the split GMP engine.");
+    m.def("lucas_lehmer_fft_res", [](unsigned long p) { bool r = lucas_lehmer_fft(p); return std::make_pair(r, g_last_res64); }, py::arg("p"),
+          "(is_prime, res64) on the FFT engine (exact; GMP redo on rounding trouble).");
     m.def("fft_info", &fft_info, py::arg("p"), "(FFT length, bits per word, worst rounding error) of an FFT-engine test of p.");
     m.attr("fft_backend") = std::string(LL_FFT_BACKEND);
     m.def("set_fft_bits_per_word", [](double b) { g_max_bpw = b; }, py::arg("bits"),

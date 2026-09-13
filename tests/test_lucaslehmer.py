@@ -41,6 +41,13 @@ def test_cuda_engine_if_built():
         import lucaslehmer_cuda as lc
     except ImportError:
         import pytest; pytest.skip("lucaslehmer_cuda not built")
-    res = {p: r for p, r, s in lc.lucas_lehmer_batch(ll.primes(2, 4423)) if s >= 0}
+    res = {p: r for p, r, s, res64 in lc.lucas_lehmer_batch(ll.primes(2, 4423)) if s >= 0}
     assert sorted(p for p, r in res.items() if r) == [p for p in KNOWN if p >= 64]
     assert all(res[p] == ll.lucas_lehmer(p) for p in res)
+
+
+def test_res64_agrees_across_engines():
+    for p in (4425, 9689, 20011):
+        g = ll.lucas_lehmer_res(p); f = ll.lucas_lehmer_fft_res(p); s = ll.lucas_lehmer_split_res(p, 1)
+        assert g == f == s
+        assert (g[1] == 0) == g[0]           # res64 is zero exactly for a prime

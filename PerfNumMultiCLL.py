@@ -12,7 +12,7 @@ Splits Lucas-Lehmer tests over N workers. Two executors:
   PerfNumMultiCLL.py -n 2 10001            # just count the primes in a range
   PerfNumMultiCLL.py -r 10001 --json out.json
 """
-import argparse, json, os, sys, time
+import argparse, tempfile, json, os, sys, time
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_completed
 
 import lucaslehmer as ll
@@ -32,12 +32,14 @@ def known_exponents():
 ENGINE = "fft"
 
 def test_one(p, depth=0):
+    """(p, is_prime, seconds, res64). res64 is the low 64 bits of the final residue, GIMPS style:
+    0 for a prime, otherwise a fingerprint of the whole run that a reference pass can be checked against."""
     t0 = time.perf_counter()
     if ENGINE == "fft":
-        r = ll.lucas_lehmer_fft(p)          # IBDWT / FFT squaring; exact (GMP redo on rounding trouble)
+        r, res = ll.lucas_lehmer_fft_res(p)          # IBDWT / FFT squaring; exact (GMP redo on rounding trouble)
     else:
-        r = ll.lucas_lehmer_split(p, depth) if depth else ll.lucas_lehmer(p)
-    return p, r, time.perf_counter() - t0
+        r, res = ll.lucas_lehmer_split_res(p, depth) if depth else ll.lucas_lehmer_res(p)
+    return p, r, time.perf_counter() - t0, res
 
 SPLIT_THREADS = {0: 1, 1: 3, 2: 9}   # threads one test uses at each split depth
 
@@ -61,6 +63,12 @@ def main(argv=None):
                     help="fft = floating-point IBDWT squaring (FFTW/oneMKL, uses the vector units, default); "
                          "gmp = integer GMP squaring; cuda = exact integer NTT on the GPU, one thread block per exponent "
                          "(needs the lucaslehmer_cuda extension: make cuda). All three are exact.")
+    ap.add_argument("--verify", metavar="RUN.json",
+                    help="stress/validation: compare every res64 against a previous run's --json output; "
+                         "any mismatch is reported and the exit code is 3")
+    ap.add_argument("--loop", type=int, default=1, metavar="N",
+                    help="stress/validation: run the whole job N times (0 = until interrupted); the first pass "
+                         "is the res64 reference for the rest unless --verify is given")
     ap.add_argument("--cuda-batch", type=int, default=2048, metavar="N", help="cuda: exponents per launch (default 2048)")
     ap.add_argument("--split", type=int, choices=(0, 1, 2), default=0,
                     help="MAX split depth used in the TAIL of a run: 0 = never split (default), 1 = up to 3 threads "
@@ -71,6 +79,23 @@ def main(argv=None):
                     help="sorted mode: coalesce output into blocks, flushing a block once it is SEC seconds old "
                          "or 200 lines long (0 = print each line immediately)")
     a = ap.parse_args(argv)
+    if a.loop != 1:                      # torture-test mode: pass 1 makes the reference, every later pass checks it
+        base = list(argv if argv is not None else sys.argv[1:])
+        for i, x in enumerate(base):
+            if x == "--loop": del base[i:i + 2]; break
+            if x.startswith("--loop="): del base[i]; break
+        ref = a.verify; tmp = a.json or os.path.join(tempfile.gettempdir(), f"ll_res64_ref_{os.getpid()}.json")
+        n = 0
+        while a.loop == 0 or n < a.loop:
+            n += 1
+            args_i = [x for x in base if x not in ("--verify",)]
+            if ref: args_i = [x for x in args_i] ; args_i += ["--verify", ref]
+            if "--json" not in args_i: args_i += ["--json", tmp]
+            print(f"=== pass {n}" + (f" (verifying against {ref})" if ref else " (reference pass)"), file=sys.stderr, flush=True)
+            rc = main(args_i)
+            if rc == 3: print(f"=== pass {n}: RES64 MISMATCH -- stopping", file=sys.stderr); return 3
+            if not ref: ref = tmp if not a.json else a.json
+        return 0
     global ENGINE; ENGINE = a.engine
     if a.engine == "fft" and a.split: print("note: --split applies to the gmp engine only", file=sys.stderr)
 
@@ -87,13 +112,23 @@ def main(argv=None):
     gil = getattr(sys, "_is_gil_enabled", lambda: True)()
     print(f"python {sys.version.split()[0]}  gil={'on' if gil else 'off'}  gmp {ll.gmp_version}  "
           f"workers={a.threads} ({a.workers})  exponents={len(exps)}  max p={max(exps)}", flush=True)
-    hdr = f"{'exponent p':>12} | {'2^p-1 prime?':^13} | {'LL time s':>10} | {'from start s':>12} | {'digits':>8} | known"
+    hdr = f"{'exponent p':>12} | {'2^p-1 prime?':^13} | {'LL time s':>10} | {'from start s':>12} | {'res64':>16} | {'digits':>8} | known"
     print(hdr); print("-" * len(hdr), flush=True)
     t_start = time.perf_counter(); hits = []; rows = []; done = 0; last_prog = t_start
     Ex = ThreadPoolExecutor if a.workers == "threads" else ProcessPoolExecutor
 
-    def line(p, r, dt, at):
-        return (f"{p:>12} | {('YES' if r else 'no'):^13} | {dt:>10.4f} | {at:>12.3f} | "
+    ref = None; mism = []
+    if a.verify:
+        with open(a.verify) as f: ref = {row["p"]: row.get("res64") for row in json.load(f)["rows"]}
+    def record(p, r, dt, res):
+        nonlocal done
+        done += 1
+        rows.append({"p": p, "mersenne": r, "ll_s": round(dt, 6), "res64": f"{res:016x}"})
+        if r: hits.append(p)
+        if ref is not None and p in ref and ref[p] != f"{res:016x}":
+            mism.append(p); print(f"RES64 MISMATCH p={p}: got {res:016x}, reference {ref[p]}", file=sys.stderr, flush=True)
+    def line(p, r, dt, at, res=0):
+        return (f"{p:>12} | {('YES' if r else 'no'):^13} | {dt:>10.4f} | {at:>12.3f} | {res:016x} | "
                 f"{ll.mersenne_digits(p) if r else '':>8} | {'yes' if p in known else ('NEW?!' if r else '')}")
 
     ordered = a.order == "sorted"
@@ -113,17 +148,16 @@ def main(argv=None):
         block = []
         for N, ps in chunks:
             if N:
-                res = {p: (r, dt) for p, r, dt in lc.lucas_lehmer_batch(ps)}
+                res = {p: (r, dt, rs) for p, r, dt, rs in lc.lucas_lehmer_batch(ps)}
             else:
                 res = {}
             for p in ps:
-                if p in res and res[p][1] >= 0: r, dt = res[p]
+                if p in res and res[p][1] >= 0: r, dt, rs = res[p]
                 else:
-                    t0 = time.perf_counter(); r = ll.lucas_lehmer_fft(p); dt = time.perf_counter() - t0
-                now = time.perf_counter(); at = now - t_start; done += 1
-                rows.append({"p": p, "mersenne": r, "ll_s": round(dt, 6)})
-                if r: hits.append(p)
-                if r or a.all: block.append(line(p, r, dt, at))
+                    t0 = time.perf_counter(); r, rs = ll.lucas_lehmer_fft_res(p); dt = time.perf_counter() - t0
+                now = time.perf_counter(); at = now - t_start
+                record(p, r, dt, rs)
+                if r or a.all: block.append(line(p, r, dt, at, rs))
             if block: print("\n".join(block), flush=True); block = []
             if a.progress and time.perf_counter() - last_prog >= a.progress:
                 print(f"    ... {done}/{len(exps)} done, {len(hits)} hits, {time.perf_counter()-t_start:.0f} s elapsed, "
@@ -158,19 +192,18 @@ def main(argv=None):
             else:
                 futs = [ex.submit(run_adaptive, p) for p in submit_order]
             for f in as_completed(futs):
-                p, r, dt = f.result(); done += 1
+                p, r, dt, rs = f.result()
                 now = time.perf_counter(); at = now - t_start
-                rows.append({"p": p, "mersenne": r, "ll_s": round(dt, 6)})
-                if r: hits.append(p)
+                record(p, r, dt, rs)
                 if not ordered:
-                    if r or a.all: print(line(p, r, dt, at), flush=True)
+                    if r or a.all: print(line(p, r, dt, at, rs), flush=True)
                 else:
-                    results[p] = (r, dt, at)
+                    results[p] = (r, dt, at, rs)
                     while frontier < len(exps_sorted) and exps_sorted[frontier] in results:
-                        q = exps_sorted[frontier]; rq, dq, aq = results.pop(q); frontier += 1
+                        q = exps_sorted[frontier]; rq, dq, aq, rsq = results.pop(q); frontier += 1
                         if rq or a.all:
                             if not block: block_born = now
-                            block.append(line(q, rq, dq, aq))
+                            block.append(line(q, rq, dq, aq, rsq))
                     if block and (a.gap == 0 or len(block) >= 200):
                         print("\n".join(block), flush=True); block = []
                 if a.progress and now - last_prog >= a.progress:
@@ -180,8 +213,8 @@ def main(argv=None):
                 if ordered and block and a.gap and now - block_born >= a.gap:
                     print("\n".join(block), flush=True); block = []
         while ordered and frontier < len(exps_sorted):
-            q = exps_sorted[frontier]; rq, dq, aq = results.pop(q); frontier += 1
-            if rq or a.all: block.append(line(q, rq, dq, aq))
+            q = exps_sorted[frontier]; rq, dq, aq, rsq = results.pop(q); frontier += 1
+            if rq or a.all: block.append(line(q, rq, dq, aq, rsq))
         if block: print("\n".join(block), flush=True)
     total = time.perf_counter() - t_start
     hits.sort()
@@ -190,10 +223,15 @@ def main(argv=None):
           f"{len(hits)} Mersenne primes: {hits}")
     missing = [p for p in known if p <= max(exps) and p not in hits and p >= min(exps)]
     if missing: print(f"WARNING: known Mersenne exponents in range NOT found: {missing}", file=sys.stderr)
+    if ref is not None:
+        checked = sum(1 for row in rows if row["p"] in ref)
+        print(f"res64 verify against {a.verify}: {checked} checked, {len(mism)} mismatches"
+              + (f" -> {mism[:20]}" if mism else " -> all match"), file=sys.stderr, flush=True)
     if a.json:
         with open(a.json, "w") as f:
             json.dump({"python": sys.version.split()[0], "gil": gil, "gmp": ll.gmp_version, "workers": a.threads,
                        "executor": a.workers, "engine": a.engine, "fft_backend": ll.fft_backend, "split": a.split, "order": a.order, "wall_s": round(total, 3), "hits": hits, "rows": rows}, f, indent=1)
+    if mism: return 3
     return 0 if not missing else 2
 
 

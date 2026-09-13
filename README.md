@@ -161,6 +161,30 @@ A 2021 consumer card with no usable fp64 edging out a 16-core Sapphire Rapids wo
 AVX-512 MKL transforms, exactly, with a kernel that has had no tuning yet (radix-2 stages, a
 `__syncthreads` per stage, twiddles read from shared memory). GMP on the same Xeon: 1526.7 s.
 
+## Self-checking runs: res64, `--verify`, `--loop` (a GIMPS-style stress test)
+
+Every result line now carries **res64**, the low 64 bits of the final Lucas-Lehmer residue,
+the same fingerprint GIMPS uses to cross-check runs between machines. It is 0 for a prime and
+otherwise a value that depends on every one of the p-2 squarings: a single flipped bit anywhere
+in the run, in any engine, changes it. All four engines (GMP, split GMP, FFT, CUDA) produce
+identical res64 for every exponent, which is how they are checked against each other.
+
+That turns the driver into a stress test in the prime95 torture-test family, with a known-good
+answer for every exponent rather than only for the known primes:
+
+```
+PerfNumMultiCLL.py -t 128 -r 200001 --json ref.json               # reference pass on a known-good box
+PerfNumMultiCLL.py -t 128 -r 200001 --verify ref.json             # any mismatch -> reported, exit code 3
+PerfNumMultiCLL.py -t 128 -r 200001 --loop 0                      # pass 1 = reference, then verify forever
+```
+
+The exponent picks the footprint. The FFT engine's working set is about 20 bytes per transform
+point per thread, so `-r 100001` (transform 6,144) lives in each core's L2, `-p 1000003` (65,536
+points, ~1.5 MB) sits at the L2/L3 boundary, and `-p 10000019` (~12 MB per thread) drives L3 and
+the memory controllers; 128 threads of that is a memory-subsystem workload. The CUDA engine is a
+shared-memory and L2 workload: the residue never leaves the SM, host traffic is a burst per launch,
+and DRAM is idle.
+
 ## Splitting one test across threads (`--split`)
 
 GMP multiplies on one thread, so a run's tail, the last few huge exponents, used to leave the
