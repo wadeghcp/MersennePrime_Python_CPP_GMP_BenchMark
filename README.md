@@ -244,8 +244,8 @@ had no guard.
 23 keeps the author's margin). Verified on the 3070 Ti: both types correct at
 11.53, 12.59 and 13.35 bits per word, `-ll 3021377` returns "3021377 is PRIME!" with res64 0,
 `-prp` runs clean to 100,000 iterations with the error margin up seven orders of magnitude, 19.07
-bits per word unchanged at 59 us/iteration. Submitted upstream from
-`wadeghcp/gpuowl`, branch `fix-i96-sloppy-carry32`.
+bits per word unchanged at 59 us/iteration. Submitted upstream as
+[preda/gpuowl#351](https://github.com/preda/gpuowl/pull/351).
 
 **6. Why it matters, and why nobody had hit it.** The code is three months old and unreleased,
 production exponents sit near 19 bits per word where the temporary fits, and GIMPS runs PRP with
