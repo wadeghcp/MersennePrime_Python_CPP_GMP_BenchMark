@@ -95,6 +95,7 @@ is now a few minutes.
 |---|---|---|
 | Xeon w5-3435X, 16 cores / 32 threads, 3.4 GHz base | 32 | 1526.7 s (`--engine gmp`), 442.5 s (`--engine fft`) |
 | Xeon Platinum 8480+ (Sapphire Rapids), 2.0 GHz base | 128 | 337 s (`--engine gmp`) |
+| Xeon Platinum 8480+, `make FFT=mkl` | 128 | 100 s (`--engine fft`); `-r 200001` (17,984 exponents, 29 primes): 777 s |
 
 The 8480+ does p = 44,497 in 1.55 s on one thread against 2.9 s on the w5, but a 128-thread run
 slows every test 1.57x (SMT siblings and all-core clocks), so the 4x thread count buys 4.5x.
