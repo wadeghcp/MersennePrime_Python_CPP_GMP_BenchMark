@@ -88,7 +88,7 @@ is now a few minutes.
 
 | host | threads | wall |
 |---|---|---|
-| Xeon w5-3435X, 16 cores / 32 threads, 3.4 GHz base | 32 | 1526.7 s (`--engine gmp`) |
+| Xeon w5-3435X, 16 cores / 32 threads, 3.4 GHz base | 32 | 1526.7 s (`--engine gmp`), 442.5 s (`--engine fft`) |
 | Xeon Platinum 8480+ (Sapphire Rapids), 2.0 GHz base | 128 | 337 s (`--engine gmp`) |
 
 The 8480+ does p = 44,497 in 1.55 s on one thread against 2.9 s on the w5, but a 128-thread run
@@ -118,7 +118,8 @@ error) for a full run of p.
 | p = 86,243 | 6.58 s | 1.95 s (3.4x) | 1.79 s (3.7x) |
 | p = 110,503 | 11.54 s | 3.00 s (3.8x) | 2.76 s (4.2x) |
 
-`-r 30001` on 32 threads: 28.3 s GMP, 15.2 s FFT. FFT_100K_ROW
+`-r 30001` on 32 threads: 28.3 s GMP, 15.2 s FFT. `-r 100001` on 32 threads: 1526.7 s GMP, 442.5 s FFT
+(3.45x), same 28 primes.
 
 Prime95's hand-written assembly is another 2-3x beyond a library FFT at these sizes; that gap is
 two decades of GIMPS tuning, not algorithm.
