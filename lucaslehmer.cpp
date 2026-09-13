@@ -204,6 +204,9 @@ static double bench_square(unsigned long bits, int iters, int depth) {
 // exactly with GMP, so the answer is never trusted to floating point alone. The final residue
 // is rebuilt as an exact integer with GMP before the zero test.
 #include <fftw3.h>
+#ifdef LL_FFT_MKL
+#include <mkl_service.h>
+#endif
 #include <cmath>
 #include <map>
 #ifndef LL_FFT_BACKEND
@@ -326,6 +329,9 @@ static std::tuple<size_t, double, double> fft_info(unsigned long p) {
 }
 
 PYBIND11_MODULE(lucaslehmer, m, py::mod_gil_not_used()) {
+#ifdef LL_FFT_MKL
+    mkl_set_threading_layer(MKL_THREADING_SEQUENTIAL);   // one FFT per Python thread; no OpenMP runtime needed
+#endif
     m.doc() = "Lucas-Lehmer Mersenne prime test on GMP (releases the GIL; free-threading safe)";
     m.def("lucas_lehmer", &lucas_lehmer, py::arg("p"),
           "True iff 2^p - 1 is prime (Lucas-Lehmer). p should be prime.");

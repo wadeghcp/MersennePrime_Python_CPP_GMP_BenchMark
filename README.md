@@ -30,8 +30,13 @@ method names is still exported for anyone who imported it.
 ## Build
 
 Requires a C++17 compiler, GMP and FFTW3 headers (`libgmp-dev libfftw3-dev` on Debian/Ubuntu), and
-`pybind11`. `make FFT=mkl` builds the FFT engine on oneMKL's FFTW3 wrapper instead (AVX-512 FFTs;
-`MKLROOT` defaults to `/opt/intel/oneapi/mkl/latest`).
+`pybind11`. `make FFT=mkl` builds the FFT engine on oneMKL's FFTW3 wrapper instead (AVX-512 FFTs, ~8%
+faster per test here; `MKLROOT` defaults to `/opt/intel/oneapi/mkl/latest`; with Debian/Ubuntu's
+`libmkl-dev` use `make FFT=mkl MKLINC=/usr/include/mkl MKLLIB=/usr/lib/x86_64-linux-gnu`). It links
+`libmkl_rt` only: the split MKL libraries cannot be loaded from a Python extension ("cannot load
+libmkl_avx512.so ... undefined symbol"). Note that installing Debian's MKL packages offers to make
+MKL the system-wide BLAS/LAPACK alternative; decline that on a machine you care about, this build
+does not need it.
 
 ```sh
 python3 -m pip install pybind11            # once, into the interpreter you will use
