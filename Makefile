@@ -31,11 +31,20 @@ all: $(TARGET)
 $(TARGET): lucaslehmer.cpp
 	$(CXX) $(CXXFLAGS) $(FFTFLAGS) $(PYINC) -shared -o $@ $< -lgmp $(FFTLIBS) -lm
 
+# CUDA engine (needs nvcc + a GPU; CUDA 12.0 wants a gcc <= 12 host compiler: NVCC_CCBIN=gcc-12)
+NVCC     ?= nvcc
+CUDA_ARCH ?= sm_86
+NVCC_CCBIN ?=
+CUDA_TARGET := lucaslehmer_cuda$(EXT)
+cuda: $(CUDA_TARGET)
+$(CUDA_TARGET): cuda/ll_ntt.cu
+	$(NVCC) -O3 -std=c++17 -arch=$(CUDA_ARCH) $(if $(NVCC_CCBIN),-ccbin $(NVCC_CCBIN),) -Xcompiler -fPIC -Xcompiler -fvisibility=hidden $(PYINC) -shared -o $@ $< -lgmp
+
 test: $(TARGET)
 	$(PYTHON) -m pytest -q tests
 
 clean:
-	rm -f lucaslehmer*.so
+	rm -f lucaslehmer*.so lucaslehmer_cuda*.so
 	@echo Clean done
 
-.PHONY: all test clean
+.PHONY: all test clean cuda

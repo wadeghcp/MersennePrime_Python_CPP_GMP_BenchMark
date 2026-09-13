@@ -34,3 +34,13 @@ def test_fft_engine_matches_known_and_gmp():
     assert all(ll.lucas_lehmer_fft(p) == ll.lucas_lehmer(p) for p in ll.primes(4425, 6000))
     n, bpw, err = ll.fft_info(9689)
     assert ll.lucas_lehmer_fft(9689) and err < 0.05 and bpw <= 18
+
+
+def test_cuda_engine_if_built():
+    try:
+        import lucaslehmer_cuda as lc
+    except ImportError:
+        import pytest; pytest.skip("lucaslehmer_cuda not built")
+    res = {p: r for p, r, s in lc.lucas_lehmer_batch(ll.primes(2, 4423)) if s >= 0}
+    assert sorted(p for p, r in res.items() if r) == [p for p in KNOWN if p >= 64]
+    assert all(res[p] == ll.lucas_lehmer(p) for p in res)

@@ -57,9 +57,11 @@ def main(argv=None):
     ap.add_argument("--order", choices=("sorted", "done"), default="sorted",
                     help="sorted (default): results stream out in ascending p, each printed as soon as every smaller "
                          "exponent has finished; done: print in completion order, whatever finishes first")
-    ap.add_argument("--engine", choices=("fft", "gmp"), default="fft",
+    ap.add_argument("--engine", choices=("fft", "gmp", "cuda"), default="fft",
                     help="fft = floating-point IBDWT squaring (FFTW/oneMKL, uses the vector units, default); "
-                         "gmp = integer GMP squaring. Both are exact.")
+                         "gmp = integer GMP squaring; cuda = exact integer NTT on the GPU, one thread block per exponent "
+                         "(needs the lucaslehmer_cuda extension: make cuda). All three are exact.")
+    ap.add_argument("--cuda-batch", type=int, default=2048, metavar="N", help="cuda: exponents per launch (default 2048)")
     ap.add_argument("--split", type=int, choices=(0, 1, 2), default=0,
                     help="MAX split depth used in the TAIL of a run: 0 = never split (default), 1 = up to 3 threads "
                          "per test, 2 = up to 9. Measured: no gain on ranges; use for a few large exponents. Every test starts plain while the queue is long; once fewer "
@@ -96,60 +98,91 @@ def main(argv=None):
 
     ordered = a.order == "sorted"
     exps_sorted = sorted(exps)
-    # Tail-adaptive split: ONE pool of a.threads plain workers, every test starts on one thread
-    # while the unstarted queue is deep (that is where throughput lives: a plain thread is 100%
-    # efficient, a 3-way split 59%, a 9-way split 29%). When fewer unstarted exponents remain
-    # than threads, the idle threads would go to waste, so tests that start from then on take
-    # split threads: depth 1 when remaining*3 <= threads, depth 2 when remaining*9 <= threads,
-    # so the split threads never oversubscribe the cores.
-    import threading
-    remaining = [len(exps)]; rlock = threading.Lock()
-    def run_adaptive(p):
-        with rlock:
-            remaining[0] -= 1; left = remaining[0]
-        depth = 0
-        if a.split >= 1 and left <= a.threads // 3: depth = 1
-        if a.split >= 2 and left <= max(1, a.threads // 9): depth = 2
-        return test_one(p, depth)
-    results = {}                     # p -> (r, dt, at)   completed, not yet printed (sorted mode)
-    frontier = 0                     # index into exps_sorted of the next exponent to print
-    block = []; block_born = None
-    Ex = ThreadPoolExecutor if a.workers == "threads" else ProcessPoolExecutor
-    submit_order = exps_sorted if ordered else sorted(exps, reverse=True)
-    if a.workers == "processes":     # no shared counter across processes: split the last threads//2 by position
-        n = len(submit_order); cut1 = n - a.threads // 3; cut2 = n - max(1, a.threads // 9)
-        def depth_for(i): return 2 if (a.split >= 2 and i >= cut2) else (1 if (a.split >= 1 and i >= cut1) else 0)
-    with Ex(max_workers=a.threads) as ex:
-        if a.workers == "processes":
-            futs = [ex.submit(test_one, p, depth_for(i)) for i, p in enumerate(submit_order)]
-        else:
-            futs = [ex.submit(run_adaptive, p) for p in submit_order]
-        for f in as_completed(futs):
-            p, r, dt = f.result(); done += 1
-            now = time.perf_counter(); at = now - t_start
-            rows.append({"p": p, "mersenne": r, "ll_s": round(dt, 6)})
-            if r: hits.append(p)
-            if not ordered:
-                if r or a.all: print(line(p, r, dt, at), flush=True)
+    if a.engine == "cuda":
+        # GPU path: one thread block per exponent, launched in ascending groups that share a
+        # transform length, in chunks so the ordered output streams. Exponents the kernel cannot
+        # take (p < 64, or above its shared-memory limit) run on the CPU FFT engine.
+        import lucaslehmer_cuda as lc
+        name, sms, mem = lc.device_info()
+        print(f"cuda: {name}, {sms} SMs, kernel max p = {lc.max_exponent()}", file=sys.stderr, flush=True)
+        chunks = []
+        for p in exps_sorted:
+            N = lc.ntt_length(p) if p >= 64 else 0
+            if chunks and chunks[-1][0] == N and len(chunks[-1][1]) < a.cuda_batch: chunks[-1][1].append(p)
+            else: chunks.append((N, [p]))
+        block = []
+        for N, ps in chunks:
+            if N:
+                res = {p: (r, dt) for p, r, dt in lc.lucas_lehmer_batch(ps)}
             else:
-                results[p] = (r, dt, at)
-                while frontier < len(exps_sorted) and exps_sorted[frontier] in results:
-                    q = exps_sorted[frontier]; rq, dq, aq = results.pop(q); frontier += 1
-                    if rq or a.all:
-                        if not block: block_born = now
-                        block.append(line(q, rq, dq, aq))
-                if block and (a.gap == 0 or len(block) >= 200):
+                res = {}
+            for p in ps:
+                if p in res and res[p][1] >= 0: r, dt = res[p]
+                else:
+                    t0 = time.perf_counter(); r = ll.lucas_lehmer_fft(p); dt = time.perf_counter() - t0
+                now = time.perf_counter(); at = now - t_start; done += 1
+                rows.append({"p": p, "mersenne": r, "ll_s": round(dt, 6)})
+                if r: hits.append(p)
+                if r or a.all: block.append(line(p, r, dt, at))
+            if block: print("\n".join(block), flush=True); block = []
+            if a.progress and time.perf_counter() - last_prog >= a.progress:
+                print(f"    ... {done}/{len(exps)} done, {len(hits)} hits, {time.perf_counter()-t_start:.0f} s elapsed, "
+                      f"last p={ps[-1]} N={N}", file=sys.stderr, flush=True); last_prog = time.perf_counter()
+    else:
+        # Tail-adaptive split: ONE pool of a.threads plain workers, every test starts on one thread
+        # while the unstarted queue is deep (that is where throughput lives: a plain thread is 100%
+        # efficient, a 3-way split 59%, a 9-way split 29%). When fewer unstarted exponents remain
+        # than threads, the idle threads would go to waste, so tests that start from then on take
+        # split threads: depth 1 when remaining*3 <= threads, depth 2 when remaining*9 <= threads,
+        # so the split threads never oversubscribe the cores.
+        import threading
+        remaining = [len(exps)]; rlock = threading.Lock()
+        def run_adaptive(p):
+            with rlock:
+                remaining[0] -= 1; left = remaining[0]
+            depth = 0
+            if a.split >= 1 and left <= a.threads // 3: depth = 1
+            if a.split >= 2 and left <= max(1, a.threads // 9): depth = 2
+            return test_one(p, depth)
+        results = {}                     # p -> (r, dt, at)   completed, not yet printed (sorted mode)
+        frontier = 0                     # index into exps_sorted of the next exponent to print
+        block = []; block_born = None
+        Ex = ThreadPoolExecutor if a.workers == "threads" else ProcessPoolExecutor
+        submit_order = exps_sorted if ordered else sorted(exps, reverse=True)
+        if a.workers == "processes":     # no shared counter across processes: split the last threads//2 by position
+            n = len(submit_order); cut1 = n - a.threads // 3; cut2 = n - max(1, a.threads // 9)
+            def depth_for(i): return 2 if (a.split >= 2 and i >= cut2) else (1 if (a.split >= 1 and i >= cut1) else 0)
+        with Ex(max_workers=a.threads) as ex:
+            if a.workers == "processes":
+                futs = [ex.submit(test_one, p, depth_for(i)) for i, p in enumerate(submit_order)]
+            else:
+                futs = [ex.submit(run_adaptive, p) for p in submit_order]
+            for f in as_completed(futs):
+                p, r, dt = f.result(); done += 1
+                now = time.perf_counter(); at = now - t_start
+                rows.append({"p": p, "mersenne": r, "ll_s": round(dt, 6)})
+                if r: hits.append(p)
+                if not ordered:
+                    if r or a.all: print(line(p, r, dt, at), flush=True)
+                else:
+                    results[p] = (r, dt, at)
+                    while frontier < len(exps_sorted) and exps_sorted[frontier] in results:
+                        q = exps_sorted[frontier]; rq, dq, aq = results.pop(q); frontier += 1
+                        if rq or a.all:
+                            if not block: block_born = now
+                            block.append(line(q, rq, dq, aq))
+                    if block and (a.gap == 0 or len(block) >= 200):
+                        print("\n".join(block), flush=True); block = []
+                if a.progress and now - last_prog >= a.progress:
+                    print(f"    ... {done}/{len(exps)} done, {len(hits)} hits, {now-t_start:.0f} s elapsed"
+                          + (f", next in order: p={exps_sorted[frontier]}" if ordered and frontier < len(exps_sorted) else ""),
+                          file=sys.stderr, flush=True); last_prog = now
+                if ordered and block and a.gap and now - block_born >= a.gap:
                     print("\n".join(block), flush=True); block = []
-            if a.progress and now - last_prog >= a.progress:
-                print(f"    ... {done}/{len(exps)} done, {len(hits)} hits, {now-t_start:.0f} s elapsed"
-                      + (f", next in order: p={exps_sorted[frontier]}" if ordered and frontier < len(exps_sorted) else ""),
-                      file=sys.stderr, flush=True); last_prog = now
-            if ordered and block and a.gap and now - block_born >= a.gap:
-                print("\n".join(block), flush=True); block = []
-    while ordered and frontier < len(exps_sorted):
-        q = exps_sorted[frontier]; rq, dq, aq = results.pop(q); frontier += 1
-        if rq or a.all: block.append(line(q, rq, dq, aq))
-    if block: print("\n".join(block), flush=True)
+        while ordered and frontier < len(exps_sorted):
+            q = exps_sorted[frontier]; rq, dq, aq = results.pop(q); frontier += 1
+            if rq or a.all: block.append(line(q, rq, dq, aq))
+        if block: print("\n".join(block), flush=True)
     total = time.perf_counter() - t_start
     hits.sort()
     print("-" * len(hdr), flush=True)
