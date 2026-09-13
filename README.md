@@ -129,6 +129,37 @@ error) for a full run of p.
 Prime95's hand-written assembly is another 2-3x beyond a library FFT at these sizes; that gap is
 two decades of GIMPS tuning, not algorithm.
 
+## The CUDA engine (`--engine cuda`)
+
+`make cuda` builds `lucaslehmer_cuda` (nvcc, `CUDA_ARCH=sm_86` by default, `NVCC_CCBIN=gcc-12`
+if your CUDA wants an older host compiler). It is the same IBDWT idea as the FFT engine, done in
+a finite field instead of floating point, so it is exact by construction and needs no fp64, which
+GeForce parts only have at 1/64 rate.
+
+- Field: GF(q), q = 2^64 - 2^32 + 1. 2^32 divides q - 1, so power-of-two NTTs exist, and 2 has
+  order 192, so an N-th root of 2 exists for every N | 2^26. That root supplies the "irrational"
+  weights 2^(ceil(jp/N) - jp/N) as field elements, and one cyclic convolution of the weighted
+  digits is the squaring modulo 2^p - 1 with no reduction step.
+- One thread block per exponent runs the whole test on-device: forward NTT (decimation in
+  frequency), pointwise square, inverse NTT (decimation in time, so no bit reversal), unweight,
+  balanced carry in parallel chunks with the top carry wrapping into word 0. The digits never
+  leave shared memory until the end; the final residue is rebuilt with GMP on the host.
+- Exactness: every convolution digit is an integer below N * 2^(2B - 1), and N is chosen so that
+  is under q/2, so the field value is the integer. Nothing to round, no error bound to watch.
+- Limit of this version: shared memory, N <= 8192, so p <= 204,800 on sm_86. Larger p needs a
+  global-memory (four-step) NTT, which is also where a GPU starts to win outright.
+
+Measured, same exponents and the same 28 primes every time:
+
+| range | CPU FFT engine, 32 Xeon w5-3435X threads | CUDA engine, RTX 3070 Ti (48 SMs, 8 GB) |
+|---|---|---|
+| `-r 30001` | 15.2 s | 11.1 s |
+| `-r 100001` | 442.5 s | 394.2 s |
+
+A 2021 consumer card with no usable fp64 edging out a 16-core Sapphire Rapids workstation with
+AVX-512 MKL transforms, exactly, with a kernel that has had no tuning yet (radix-2 stages, a
+`__syncthreads` per stage, twiddles read from shared memory). GMP on the same Xeon: 1526.7 s.
+
 ## Splitting one test across threads (`--split`)
 
 GMP multiplies on one thread, so a run's tail, the last few huge exponents, used to leave the
