@@ -185,6 +185,43 @@ the memory controllers; 128 threads of that is a memory-subsystem workload. The 
 shared-memory and L2 workload: the residue never leaves the SM, host traffic is a burst per launch,
 and DRAM is idle.
 
+## Cross-checked against prime95 and gpuowl at 3 million bits
+
+`lucaslehmer.gmp_res64_after(p, iters)` and `fft_res64_after(p, iters)` run only the first
+`iters` squarings and return the residue, so an engine can be checked against another program's
+interim residues without running a multi-hour test to the end. For p = 3,021,377 (M37, a known
+prime) after 20,000 squarings from s_0 = 4:
+
+| implementation | res64 after 20,000 squarings |
+|---|---|
+| prime95 v30.19 b20 (`InterimResidues=20000`; prime95 counts the seed as iteration 2, so its "iteration 20002" line) | `CE811E3772129824` |
+| GMP engine, exact | `ce811e3772129824` |
+| FFT engine, fp64, worst rounding error 7e-4 | `ce811e3772129824` |
+| PRPLL/gpuowl master 4d0e759 (2025-12-14), `-ll`, "FP32+M61" 256K FFT, on an RTX 3070 Ti **and** on a Data Center GPU Max 1100 | `d7979bd162116bee` |
+
+Three independent implementations agree to the bit; the gpuowl development snapshot disagrees
+with all of them, identically on two vendors' GPUs, and reports the known prime as composite
+(res64 `a0ec9abad5afd56e` at the end, "status":"C"). Its own `-prp` mode on the same exponent
+trips the Gerbicz check at the first block ("EE ... Consistent error, will stop"), so the error
+is real and deterministic, and plain LL has no check to catch it. Reported upstream.
+
+Per-iteration cost at that size, this box (Xeon w5-3435X), is the honest picture of where a
+single monolithic transform stands against the state of the art:
+
+| p = 3,021,377, one squaring | ms |
+|---|---|
+| prime95, AVX-512 192K FFT, 1 thread | 0.54 |
+| prime95, 10 threads | 0.10 |
+| GMP engine (exact) | 4.1 |
+| FFT engine (FFTW, one 196,608-point transform) | 6.6 |
+| PRPLL on the RTX 3070 Ti (wrong answer, see above) | 0.06 |
+
+At p ~ 1e5 the FFT engine trails prime95 by about 3x (6K FFT: prime95 8.5 us/iteration, FFT
+engine 25 us). At 3e6 it trails by 12x and falls behind GMP: a 3 MB working set no longer fits a
+core's L2, and one big transform streams it from L3 on every pass, where prime95's Pass1/Pass2
+split keeps each pass in cache and fuses weighting and carry into the transform. That two-pass
+("four-step") structure is the next engine, on the CPU and on the GPU alike.
+
 ## Splitting one test across threads (`--split`)
 
 GMP multiplies on one thread, so a run's tail, the last few huge exponents, used to leave the

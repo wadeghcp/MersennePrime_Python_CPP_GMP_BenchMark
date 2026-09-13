@@ -26,7 +26,7 @@ static inline void note_res64(const mpz_t s) { g_last_res64 = mpz_get_ui(s); }  
 
 // Lucas-Lehmer: M_p = 2^p - 1 is prime iff s_{p-2} == 0 with s_0 = 4, s_{k+1} = s_k^2 - 2 (mod M_p).
 // p must itself be prime for the test to mean anything; p == 2 is handled (M_2 = 3 is prime).
-static bool lucas_lehmer(unsigned long p) {
+static bool lucas_lehmer_n(unsigned long p, unsigned long max_iters) {
     if (p < 2) return false;
     if (p == 2) return true;
     if (p % 2 == 0) return false;
@@ -36,7 +36,7 @@ static bool lucas_lehmer(unsigned long p) {
     mpz_set_ui(s, 4);
     {
         py::gil_scoped_release release;   // the hot loop runs without the GIL
-        for (unsigned long i = 0; i + 2 < p; ++i) {
+        for (unsigned long i = 0; i + 2 < p && (!max_iters || i < max_iters); ++i) {
             mpz_mul(s, s, s);
             mpz_sub_ui(s, s, 2);
             // s mod (2^p - 1) via the bit trick: s = (s & M) + (s >> p), repeated once more if needed.
@@ -54,6 +54,8 @@ static bool lucas_lehmer(unsigned long p) {
     mpz_clear(M); mpz_clear(s);
     return prime;
 }
+
+static bool lucas_lehmer(unsigned long p) { return lucas_lehmer_n(p, 0); }
 
 // Digits of M_p in base 10, without materialising the number in Python.
 static std::string mersenne_str(unsigned long p) {
@@ -252,7 +254,7 @@ static size_t fft_length(unsigned long p, double max_bpw = 0.0) {
 }
 
 // 1 = prime, 0 = composite, -1 = rounding error too large (redo exactly). err_out gets the worst error seen.
-static int lucas_lehmer_fft_raw(unsigned long p, double* err_out = nullptr) {
+static int lucas_lehmer_fft_raw(unsigned long p, double* err_out = nullptr, unsigned long max_iters = 0) {
     if (p < 2) return 0;
     if (p == 2) return 1;
     if (p % 2 == 0) return 0;
@@ -276,7 +278,7 @@ static int lucas_lehmer_fft_raw(unsigned long p, double* err_out = nullptr) {
     int verdict = -1;
     {
         py::gil_scoped_release release;
-        for (unsigned long it = 0; it + 2 < p; ++it) {
+        for (unsigned long it = 0; it + 2 < p && (!max_iters || it < max_iters); ++it) {
             for (size_t j = 0; j < N; ++j) y[j] = (double)x[j] * w[j];
             fftw_execute_dft_r2c(P.fwd, y, Y);
             for (size_t k = 0; k <= N / 2; ++k) {                                  // Y_k^2
@@ -356,6 +358,11 @@ PYBIND11_MODULE(lucaslehmer, m, py::mod_gil_not_used()) {
           py::arg("p"), py::arg("depth") = 1, "(is_prime, res64) on the split GMP engine.");
     m.def("lucas_lehmer_fft_res", [](unsigned long p) { bool r = lucas_lehmer_fft(p); return std::make_pair(r, g_last_res64); }, py::arg("p"),
           "(is_prime, res64) on the FFT engine (exact; GMP redo on rounding trouble).");
+    m.def("fft_res64_after", [](unsigned long p, unsigned long iters) { double e; lucas_lehmer_fft_raw(p, &e, iters); return std::make_pair(g_last_res64, e); },
+          py::arg("p"), py::arg("iters"), "(res64, worst rounding error) after only `iters` squarings of the LL sequence for p: "
+          "cross-check against another program's intermediate residue (prime95 / gpuowl print these).");
+    m.def("gmp_res64_after", [](unsigned long p, unsigned long iters) { lucas_lehmer_n(p, iters); return g_last_res64; },
+          py::arg("p"), py::arg("iters"), "res64 after only `iters` squarings on the exact GMP engine (slow for big p; the arbiter).");
     m.def("fft_info", &fft_info, py::arg("p"), "(FFT length, bits per word, worst rounding error) of an FFT-engine test of p.");
     m.attr("fft_backend") = std::string(LL_FFT_BACKEND);
     m.def("set_fft_bits_per_word", [](double b) { g_max_bpw = b; }, py::arg("bits"),
