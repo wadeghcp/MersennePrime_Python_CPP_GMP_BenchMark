@@ -195,8 +195,7 @@ the reference GPU implementation. The chain of evidence, in order:
 **1. The observation.** PRPLL (gpuowl master 4d0e759, 2025-12-14), run as a five-minute smoke test
 on M37 (p = 3,021,377, a known prime) with its default transform for that size, reported the prime
 as **composite**: `-ll 3021377` -> "status":"C", res64 `a0ec9abad5afd56e`, in 3 min 5 s on an RTX
-3070 Ti and, bit for bit the same, in 16 min 16 s on a Data Center GPU Max 1100. Deterministic, so
-not a hardware fault.
+3070 Ti. The same residue on every rerun, so deterministic, not a hardware fault.
 
 **2. The oracle.** The residue after 20,000 squarings from s_0 = 4 is a checkable fingerprint:
 
@@ -205,7 +204,7 @@ not a hardware fault.
 | prime95 v30.19 b20 (`InterimResidues=20000`; it counts the seed as iteration 2, so its "iteration 20002" line) | `CE811E3772129824` |
 | this repo, GMP engine, exact integer arithmetic | `ce811e3772129824` |
 | this repo, FFT engine, fp64, worst rounding error 7e-4 | `ce811e3772129824` |
-| PRPLL, "FP32+M61" 256K transform, both GPUs | `d7979bd162116bee` |
+| PRPLL, "FP32+M61" 256K transform, RTX 3070 Ti | `d7979bd162116bee` |
 
 Three independent implementations agree to the bit, and prime95 is the author's own CPU code.
 It is not an off-by-one: our residues at 19,999 and 20,001 match neither. PRPLL's own `-prp` mode
@@ -242,7 +241,7 @@ guarded the identical branch in the 64-bit variant with `EXP / NWORDS >= 23` and
 had no guard.
 
 **5. The fix.** The same one-line guard on the 96-bit variant (derived requirement nBits >= 16;
-23 keeps the author's margin). Verified on the 3070 Ti and the Max 1100: both types correct at
+23 keeps the author's margin). Verified on the 3070 Ti: both types correct at
 11.53, 12.59 and 13.35 bits per word, `-ll 3021377` returns "3021377 is PRIME!" with res64 0,
 `-prp` runs clean to 100,000 iterations with the error margin up seven orders of magnitude, 19.07
 bits per word unchanged at 59 us/iteration. Submitted upstream from
@@ -266,7 +265,6 @@ single monolithic transform stands against the state of the art:
 | GMP engine (exact) | 4.1 |
 | FFT engine (FFTW, one 196,608-point transform) | 6.6 |
 | PRPLL on the RTX 3070 Ti (wrong answer before the fix; 59 us after) | 0.06 |
-| PRPLL on the Data Center GPU Max 1100 (same) | 0.32 |
 
 At p = 44,497 the FFT engine is within 1.4x of prime95 (4,608-point FFT: prime95 7 us/iteration,
 FFT engine 10 us); at p ~ 1e5 it trails by about 3x (6K FFT: prime95 8.5 us, FFT engine 25 us).
