@@ -27,3 +27,10 @@ def test_split_matches_plain():
     for d in (1, 2):
         assert [p for p in ll.primes(2, 4423) if ll.lucas_lehmer_split(p, d)] == KNOWN
         assert not ll.lucas_lehmer_split(4425, d)
+
+
+def test_fft_engine_matches_known_and_gmp():
+    assert [p for p in ll.primes(2, 4423) if ll.lucas_lehmer_fft(p)] == KNOWN
+    assert all(ll.lucas_lehmer_fft(p) == ll.lucas_lehmer(p) for p in ll.primes(4425, 6000))
+    n, bpw, err = ll.fft_info(9689)
+    assert ll.lucas_lehmer_fft(9689) and err < 0.05 and bpw <= 18

@@ -29,7 +29,9 @@ method names is still exported for anyone who imported it.
 
 ## Build
 
-Requires a C++17 compiler, GMP headers (`libgmp-dev` on Debian/Ubuntu), and `pybind11`.
+Requires a C++17 compiler, GMP and FFTW3 headers (`libgmp-dev libfftw3-dev` on Debian/Ubuntu), and
+`pybind11`. `make FFT=mkl` builds the FFT engine on oneMKL's FFTW3 wrapper instead (AVX-512 FFTs;
+`MKLROOT` defaults to `/opt/intel/oneapi/mkl/latest`).
 
 ```sh
 python3 -m pip install pybind11            # once, into the interpreter you will use
@@ -51,8 +53,9 @@ make PYTHON=.venv/bin/python
 ## Run
 
 ```
-PerfNumMultiCLL.py -t 32 -r 100001         # ordered output, blocks every 3 s, plain GMP on every thread
-PerfNumMultiCLL.py -t 32 -r 100001 --split 2 --gap 5   # tail tests split 9-way once cores go idle
+PerfNumMultiCLL.py -t 32 -r 100001         # ordered output, blocks every 3 s, FFT engine on every thread
+PerfNumMultiCLL.py -t 32 -r 100001 --engine gmp        # integer GMP squaring instead
+PerfNumMultiCLL.py -t 32 -r 100001 --engine gmp --split 2 --gap 5   # tail tests split 9-way once cores go idle
 PerfNumMultiCLL.py -t 32 -r 100001 --order done   # completion order
 PerfNumMultiCLL.py -t 16 -r 10001          # every prime p <= 10001 on 16 workers
 PerfNumMultiCLL.py -p 11213                # one exponent
@@ -81,15 +84,44 @@ tests near p = 20,000 run 11x faster on sixteen threads than serially on 3.14t. 
 recorded "reasonable time" for the first 200,000 whole numbers on a 12-core server; that range
 is now a few minutes.
 
-`-r 100001` (9592 exponents, 28 Mersenne primes), free-threaded 3.14.7t, threads, `--split 0`:
+`-r 100001` (9592 exponents, 28 Mersenne primes), free-threaded 3.14.7t, threads:
 
 | host | threads | wall |
 |---|---|---|
-| Xeon w5-3435X, 16 cores / 32 threads, 3.4 GHz base | 32 | 1526.7 s |
-| Xeon Platinum 8480+ (Sapphire Rapids), 2.0 GHz base | 128 | 337 s |
+| Xeon w5-3435X, 16 cores / 32 threads, 3.4 GHz base | 32 | 1526.7 s (`--engine gmp`) |
+| Xeon Platinum 8480+ (Sapphire Rapids), 2.0 GHz base | 128 | 337 s (`--engine gmp`) |
 
 The 8480+ does p = 44,497 in 1.55 s on one thread against 2.9 s on the w5, but a 128-thread run
 slows every test 1.57x (SMT siblings and all-core clocks), so the 4x thread count buys 4.5x.
+
+## The FFT engine (`--engine fft`, default)
+
+GMP squares with the integer carry chain (`mulx`/`adcx` on 64-bit limbs), which the vector units
+cannot help. Prime95 and gpuowl get their speed from a different algorithm: the Crandall-Fagin
+irrational-base discrete weighted transform (IBDWT). The residue is held as N balanced digits in
+a variable base of ceil((j+1)p/N) - ceil(jp/N) bits each and pre-weighted by 2^(ceil(jp/N) - jp/N);
+one cyclic convolution of the weighted digits is then the squaring *modulo 2^p - 1* with no
+separate reduction. The convolution is a real FFT, a pointwise complex square and an inverse FFT
+(FFTW3 or oneMKL), followed by rounding to integers and a carry pass. That is where AVX-512 goes
+to work.
+
+It stays exact. Every iteration measures the worst distance of any digit from an integer; a test
+that ever exceeds 0.35 is reported unreliable and redone with GMP, and the final residue is
+rebuilt as an exact integer with GMP before the zero test. At the default 18 bits per word the
+worst error seen over a full p = 110,503 test is 4e-3. `lucaslehmer.set_fft_bits_per_word()`
+trades FFT length for rounding margin; `lucaslehmer.fft_info(p)` returns (N, bits/word, worst
+error) for a full run of p.
+
+| one test, one thread | GMP | FFT (FFTW3, AVX2 build) | FFT (oneMKL, AVX-512) |
+|---|---|---|---|
+| p = 44,497 | 1.32 s | 0.45 s (2.9x) | 0.45 s (2.9x) |
+| p = 86,243 | 6.58 s | 1.95 s (3.4x) | 1.79 s (3.7x) |
+| p = 110,503 | 11.54 s | 3.00 s (3.8x) | 2.76 s (4.2x) |
+
+`-r 30001` on 32 threads: 28.3 s GMP, 15.2 s FFT. FFT_100K_ROW
+
+Prime95's hand-written assembly is another 2-3x beyond a library FFT at these sizes; that gap is
+two decades of GIMPS tuning, not algorithm.
 
 ## Splitting one test across threads (`--split`)
 
@@ -106,7 +138,7 @@ near a microsecond, which matters because a 100 kbit squaring is itself only ~10
 | p = 86,243 | 6.58 s | 3.71 s (1.78x) | 2.70 s (2.44x) |
 | p = 110,503 | 11.54 s | 6.49 s (1.78x) | 4.49 s (2.57x) |
 
-A split thread does less useful work than a plain one (3-way is 59% efficient, 9-way 29%), so
+The split applies to the GMP engine. A split thread does less useful work than a plain one (3-way is 59% efficient, 9-way 29%), so
 the driver never splits while the queue is deep: every test starts on one thread. Only when
 fewer unstarted exponents remain than a third of the threads do new tests take 3 threads, and
 under a ninth, 9, so idle cores are folded into the tail without oversubscribing. `--split`

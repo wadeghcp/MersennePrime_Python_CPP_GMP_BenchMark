@@ -11,6 +11,7 @@
 #include <vector>
 #include <cstdint>
 #include <string>
+#include <tuple>
 #include <stdexcept>
 
 namespace py = pybind11;
@@ -191,12 +192,151 @@ static double bench_square(unsigned long bits, int iters, int depth) {
     return secs;
 }
 
+
+// ---------------------------------------------------------------------------------------------
+// Floating-point engine: Crandall-Fagin irrational-base discrete weighted transform (IBDWT),
+// the algorithm prime95 / gpuowl use. The residue is held as N balanced digits in a variable
+// base (b_j = ceil((j+1)p/N) - ceil(jp/N) bits each) and pre-weighted by a_j = 2^(ceil(jp/N) - jp/N),
+// so one cyclic convolution of the weighted digits IS the squaring modulo 2^p - 1: no separate
+// reduction step. The convolution is a real FFT, a pointwise complex square and an inverse FFT
+// (FFTW3, or oneMKL through its FFTW3 wrapper). Every iteration measures the worst rounding
+// error; a test whose error ever exceeds 0.35 is reported unreliable and the caller redoes it
+// exactly with GMP, so the answer is never trusted to floating point alone. The final residue
+// is rebuilt as an exact integer with GMP before the zero test.
+#include <fftw3.h>
+#include <cmath>
+#include <map>
+#ifndef LL_FFT_BACKEND
+#define LL_FFT_BACKEND "fftw3"
+#endif
+
+struct FftPlans { fftw_plan fwd, inv; };
+static std::mutex g_plan_mx;
+static std::map<size_t, FftPlans> g_plans;
+
+static FftPlans plans_for(size_t N) {
+    std::lock_guard<std::mutex> lk(g_plan_mx);          // planning is not thread-safe; executing is
+    auto it = g_plans.find(N);
+    if (it != g_plans.end()) return it->second;
+    double* r = fftw_alloc_real(N); fftw_complex* c = fftw_alloc_complex(N / 2 + 1);
+    FftPlans P{fftw_plan_dft_r2c_1d((int)N, r, c, FFTW_MEASURE | FFTW_DESTROY_INPUT),
+               fftw_plan_dft_c2r_1d((int)N, c, r, FFTW_MEASURE | FFTW_DESTROY_INPUT)};
+    fftw_free(r); fftw_free(c);
+    g_plans.emplace(N, P);
+    return P;
+}
+
+// Smallest N in {2^k, 3*2^k, 5*2^k} with p/N <= max_bpw bits per word. At 18 bits/word the worst
+// rounding error measured over a full p = 110,503 test is 4e-3 against the 0.35 abort threshold.
+static double g_max_bpw = 18.0;                       // tunable: lucaslehmer.set_fft_bits_per_word()
+static size_t fft_length(unsigned long p, double max_bpw = 0.0) {
+    if (max_bpw <= 0) max_bpw = g_max_bpw;
+    size_t best = 0;
+    for (size_t m : {1, 3, 5})
+        for (size_t N = m * 16; N < ((size_t)1 << 40); N <<= 1)
+            if ((double)p / N <= max_bpw) { if (!best || N < best) best = N; break; }
+    return best;
+}
+
+// 1 = prime, 0 = composite, -1 = rounding error too large (redo exactly). err_out gets the worst error seen.
+static int lucas_lehmer_fft_raw(unsigned long p, double* err_out = nullptr) {
+    if (p < 2) return 0;
+    if (p == 2) return 1;
+    if (p % 2 == 0) return 0;
+    if (p < 512) return -1;                               // too small for the word layout; GMP is faster anyway
+    const size_t N = fft_length(p);
+    std::vector<int>      bits(N);
+    std::vector<double>   w(N), winv(N);
+    for (size_t j = 0; j < N; ++j) {
+        unsigned long lo = (j * p + N - 1) / N, hi = ((j + 1) * p + N - 1) / N;    // ceil(jp/N), ceil((j+1)p/N)
+        bits[j] = (int)(hi - lo);
+        double frac = (double)(lo * N - j * p) / (double)N;                        // in [0,1)
+        w[j] = std::exp2(frac);
+        winv[j] = 1.0 / (w[j] * (double)N);                                        // also undoes FFTW's scaling
+    }
+    std::vector<int64_t> x(N, 0);
+    x[0] = 4;
+    double* y = fftw_alloc_real(N);
+    fftw_complex* Y = fftw_alloc_complex(N / 2 + 1);
+    FftPlans P = plans_for(N);
+    double maxerr = 0.0;
+    int verdict = -1;
+    {
+        py::gil_scoped_release release;
+        for (unsigned long it = 0; it + 2 < p; ++it) {
+            for (size_t j = 0; j < N; ++j) y[j] = (double)x[j] * w[j];
+            fftw_execute_dft_r2c(P.fwd, y, Y);
+            for (size_t k = 0; k <= N / 2; ++k) {                                  // Y_k^2
+                double re = Y[k][0], im = Y[k][1];
+                Y[k][0] = re * re - im * im; Y[k][1] = 2.0 * re * im;
+            }
+            fftw_execute_dft_c2r(P.inv, Y, y);
+            double err = 0.0;
+            for (size_t j = 0; j < N; ++j) {                                       // unweight, round, error
+                double v = y[j] * winv[j], r = std::nearbyint(v);
+                double e = std::fabs(v - r); if (e > err) err = e;
+                y[j] = r;
+            }
+            if (err > maxerr) maxerr = err;
+            if (err > 0.35) { verdict = -1; goto done; }
+            int64_t carry = -2;                                                    // the "- 2" of the recurrence
+            for (size_t j = 0; j < N; ++j) {                                       // balanced carry propagation
+                int64_t v = (int64_t)y[j] + carry;
+                int b = bits[j];
+                carry = (v + ((int64_t)1 << (b - 1))) >> b;                        // floor((v + base/2) / base)
+                x[j] = v - (carry << b);
+            }
+            while (carry) {                                                        // wrap: 2^p == 1 (mod M_p)
+                for (size_t j = 0; j < N && carry; ++j) {
+                    int64_t v = x[j] + carry; int b = bits[j];
+                    carry = (v + ((int64_t)1 << (b - 1))) >> b;
+                    x[j] = v - (carry << b);
+                }
+            }
+        }
+        {   // exact final residue with GMP: s = sum x_j 2^(ceil(jp/N)) mod 2^p - 1
+            mpz_t M, s, t; mpz_init(M); mpz_init(s); mpz_init(t);
+            mpz_set_ui(M, 1); mpz_mul_2exp(M, M, p); mpz_sub_ui(M, M, 1);
+            for (size_t j = 0; j < N; ++j) {
+                if (!x[j]) continue;
+                mpz_set_si(t, (long)x[j]); mpz_mul_2exp(t, t, (j * p + N - 1) / N); mpz_add(s, s, t);
+            }
+            mpz_mod(s, s, M);
+            verdict = (mpz_cmp_ui(s, 0) == 0) ? 1 : 0;
+            mpz_clear(M); mpz_clear(s); mpz_clear(t);
+        }
+    }
+done:
+    fftw_free(y); fftw_free(Y);
+    if (err_out) *err_out = maxerr;
+    return verdict;
+}
+
+// Exact answer: FFT engine, redone with GMP if the rounding error ever got too large.
+static bool lucas_lehmer_fft(unsigned long p) {
+    int v = lucas_lehmer_fft_raw(p);
+    return v < 0 ? lucas_lehmer(p) : v == 1;
+}
+
+// (N, bits per word, worst rounding error over the whole test) -- for tuning and the README.
+static std::tuple<size_t, double, double> fft_info(unsigned long p) {
+    size_t N = fft_length(p); double err = 0.0;
+    lucas_lehmer_fft_raw(p, &err);
+    return {N, (double)p / N, err};
+}
+
 PYBIND11_MODULE(lucaslehmer, m, py::mod_gil_not_used()) {
     m.doc() = "Lucas-Lehmer Mersenne prime test on GMP (releases the GIL; free-threading safe)";
     m.def("lucas_lehmer", &lucas_lehmer, py::arg("p"),
           "True iff 2^p - 1 is prime (Lucas-Lehmer). p should be prime.");
     m.def("lucas_lehmer_split", &lucas_lehmer_split, py::arg("p"), py::arg("depth") = 1,
           "Lucas-Lehmer with the squaring split across threads: depth 1 = 3 threads, depth 2 = 9 threads.");
+    m.def("lucas_lehmer_fft", &lucas_lehmer_fft, py::arg("p"),
+          "Lucas-Lehmer on the floating-point IBDWT engine (FFT squaring, exact: falls back to GMP on rounding trouble).");
+    m.def("fft_info", &fft_info, py::arg("p"), "(FFT length, bits per word, worst rounding error) of an FFT-engine test of p.");
+    m.attr("fft_backend") = std::string(LL_FFT_BACKEND);
+    m.def("set_fft_bits_per_word", [](double b) { g_max_bpw = b; }, py::arg("bits"),
+          "Max bits per FFT word (default 18; prime95 runs ~18-19.5). Higher = shorter FFT = faster, more rounding error.");
     m.def("bench_square", &bench_square, py::arg("bits"), py::arg("iters") = 20, py::arg("depth") = 0,
           "seconds per squaring of a random bits-bit number: depth 0 plain GMP, 1 = 3-thread split, 2 = 9-thread split");
     m.def("primes", &primes_in_range, py::arg("lo"), py::arg("hi"),

@@ -29,9 +29,14 @@ def known_exponents():
         return set()
 
 
+ENGINE = "fft"
+
 def test_one(p, depth=0):
     t0 = time.perf_counter()
-    r = ll.lucas_lehmer_split(p, depth) if depth else ll.lucas_lehmer(p)
+    if ENGINE == "fft":
+        r = ll.lucas_lehmer_fft(p)          # IBDWT / FFT squaring; exact (GMP redo on rounding trouble)
+    else:
+        r = ll.lucas_lehmer_split(p, depth) if depth else ll.lucas_lehmer(p)
     return p, r, time.perf_counter() - t0
 
 SPLIT_THREADS = {0: 1, 1: 3, 2: 9}   # threads one test uses at each split depth
@@ -52,6 +57,9 @@ def main(argv=None):
     ap.add_argument("--order", choices=("sorted", "done"), default="sorted",
                     help="sorted (default): results stream out in ascending p, each printed as soon as every smaller "
                          "exponent has finished; done: print in completion order, whatever finishes first")
+    ap.add_argument("--engine", choices=("fft", "gmp"), default="fft",
+                    help="fft = floating-point IBDWT squaring (FFTW/oneMKL, uses the vector units, default); "
+                         "gmp = integer GMP squaring. Both are exact.")
     ap.add_argument("--split", type=int, choices=(0, 1, 2), default=0,
                     help="MAX split depth used in the TAIL of a run: 0 = never split (default), 1 = up to 3 threads "
                          "per test, 2 = up to 9. Measured: no gain on ranges; use for a few large exponents. Every test starts plain while the queue is long; once fewer "
@@ -61,6 +69,8 @@ def main(argv=None):
                     help="sorted mode: coalesce output into blocks, flushing a block once it is SEC seconds old "
                          "or 200 lines long (0 = print each line immediately)")
     a = ap.parse_args(argv)
+    global ENGINE; ENGINE = a.engine
+    if a.engine == "fft" and a.split: print("note: --split applies to the gmp engine only", file=sys.stderr)
 
     if a.return_num_primes_in_range:
         lo, hi = a.return_num_primes_in_range
@@ -150,7 +160,7 @@ def main(argv=None):
     if a.json:
         with open(a.json, "w") as f:
             json.dump({"python": sys.version.split()[0], "gil": gil, "gmp": ll.gmp_version, "workers": a.threads,
-                       "executor": a.workers, "split": a.split, "order": a.order, "wall_s": round(total, 3), "hits": hits, "rows": rows}, f, indent=1)
+                       "executor": a.workers, "engine": a.engine, "fft_backend": ll.fft_backend, "split": a.split, "order": a.order, "wall_s": round(total, 3), "hits": hits, "rows": rows}, f, indent=1)
     return 0 if not missing else 2
 
 
