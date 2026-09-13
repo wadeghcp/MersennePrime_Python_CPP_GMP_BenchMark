@@ -185,25 +185,76 @@ the memory controllers; 128 threads of that is a memory-subsystem workload. The 
 shared-memory and L2 workload: the residue never leaves the SM, host traffic is a burst per launch,
 and DRAM is idle.
 
-## Cross-checked against prime95 and gpuowl at 3 million bits
+## Cross-checked against prime95 and gpuowl at 3 million bits, and a bug found upstream
 
 `lucaslehmer.gmp_res64_after(p, iters)` and `fft_res64_after(p, iters)` run only the first
 `iters` squarings and return the residue, so an engine can be checked against another program's
-interim residues without running a multi-hour test to the end. For p = 3,021,377 (M37, a known
-prime) after 20,000 squarings from s_0 = 4:
+interim residues without running a multi-hour test to the end. That check found a wrong answer in
+the reference GPU implementation. The chain of evidence, in order:
+
+**1. The observation.** PRPLL (gpuowl master 4d0e759, 2025-12-14), run as a five-minute smoke test
+on M37 (p = 3,021,377, a known prime) with its default transform for that size, reported the prime
+as **composite**: `-ll 3021377` -> "status":"C", res64 `a0ec9abad5afd56e`, in 3 min 5 s on an RTX
+3070 Ti and, bit for bit the same, in 16 min 16 s on a Data Center GPU Max 1100. Deterministic, so
+not a hardware fault.
+
+**2. The oracle.** The residue after 20,000 squarings from s_0 = 4 is a checkable fingerprint:
 
 | implementation | res64 after 20,000 squarings |
 |---|---|
-| prime95 v30.19 b20 (`InterimResidues=20000`; prime95 counts the seed as iteration 2, so its "iteration 20002" line) | `CE811E3772129824` |
-| GMP engine, exact | `ce811e3772129824` |
-| FFT engine, fp64, worst rounding error 7e-4 | `ce811e3772129824` |
-| PRPLL/gpuowl master 4d0e759 (2025-12-14), `-ll`, "FP32+M61" 256K FFT, on an RTX 3070 Ti (3 min 5 s) **and** on a Data Center GPU Max 1100 (16 min 16 s) | `d7979bd162116bee` |
+| prime95 v30.19 b20 (`InterimResidues=20000`; it counts the seed as iteration 2, so its "iteration 20002" line) | `CE811E3772129824` |
+| this repo, GMP engine, exact integer arithmetic | `ce811e3772129824` |
+| this repo, FFT engine, fp64, worst rounding error 7e-4 | `ce811e3772129824` |
+| PRPLL, "FP32+M61" 256K transform, both GPUs | `d7979bd162116bee` |
 
-Three independent implementations agree to the bit; the gpuowl development snapshot disagrees
-with all of them, identically on two vendors' GPUs, and reports the known prime as composite
-(res64 `a0ec9abad5afd56e` at the end on both GPUs, "status":"C"). Its own `-prp` mode on the same exponent
-trips the Gerbicz check at the first block ("EE ... Consistent error, will stop"), so the error
-is real and deterministic, and plain LL has no check to catch it. Reported upstream.
+Three independent implementations agree to the bit, and prime95 is the author's own CPU code.
+It is not an off-by-one: our residues at 19,999 and 20,001 match neither. PRPLL's own `-prp` mode
+on the same configuration trips its Gerbicz error check at the first block, so the program can
+detect the error; plain Lucas-Lehmer has no check and reports the wrong residue as a verdict.
+
+**3. Localization.** Same exponent, every transform type PRPLL offers, 20,000 iterations each:
+fp64, M61-only and FP32+M31+M61 are correct; M31+M61 and FP32+M61, every variant, are wrong with
+the identical residue. A bits-per-word sweep on FP32+M61 (a prime near 3.3M, 3.5M, 3.8M, 4.1M,
+4.4M, 4.7M, 5.0M on the same 256K transform) is wrong at 11.53 and 12.59 bits per word and right
+from 13.35 up, and `-carry long`, which routes through the older expanded carry kernels, is right
+everywhere. So: the fused carry kernel, the two types that hold 96-bit intermediates, low bits per
+word.
+
+**4. The mechanism.** In the fused kernel, `carryStepSignedSloppy(i96)` returns a full 32-bit word
+instead of an nBits-wide one whenever a digit exceeds 2^31, on the grounds that the transform is
+rated for 34 bits per word. The transform copes, but the convolution digits then reach ~2^63
+instead of ~2^(2 BPW + 9), and the carry that `carryFinal` computes into a hard-coded `i32`
+temporary needs about 63 - 2 nBits bits: more than 31 once nBits <= 15. A probe on that temporary,
+reported through the round-off statistic, measured over the sampled iterations:
+
+| bits per word | bits the i32 temporary must hold | fits | PRPLL result |
+|---|---|---|---|
+| 11.53 | 39.5 | no | wrong |
+| 12.59 | 36.2 | no | wrong |
+| 13.35 | 33.9 | no | wrong (marginal: LL passed 20,000 iterations once, PRP and STATS runs fail) |
+| 14.50 | 29.5 | yes | right |
+| 17.93 | 23.4 | yes | right |
+| any of these, with the fix | 9.4 | yes | right |
+
+The boundary is where 63 - 2 nBits crosses 31, which is the observed transition. The author had
+guarded the identical branch in the 64-bit variant with `EXP / NWORDS >= 23` and left the comment
+"for reasons I don't fully understand the sloppy case fails if BPW is too low"; the 96-bit variant
+had no guard.
+
+**5. The fix.** The same one-line guard on the 96-bit variant (derived requirement nBits >= 16;
+23 keeps the author's margin). Verified on the 3070 Ti and the Max 1100: both types correct at
+11.53, 12.59 and 13.35 bits per word, `-ll 3021377` returns "3021377 is PRIME!" with res64 0,
+`-prp` runs clean to 100,000 iterations with the error margin up seven orders of magnitude, 19.07
+bits per word unchanged at 59 us/iteration. Submitted upstream from
+`wadeghcp/gpuowl`, branch `fix-i96-sloppy-carry32`.
+
+**6. Why it matters, and why nobody had hit it.** The code is three months old and unreleased,
+production exponents sit near 19 bits per word where the temporary fits, and GIMPS runs PRP with
+the check, so no prime was ever at risk. What breaks is the small case: the five-minute known-prime
+run that a validation engineer uses to decide whether to trust a new GPU, a new driver, or a
+day-long test on the same machine. A self-check that fails only at the small end is the worst place
+for a weak link, because that is the case everything else is trusted on. That is the case this
+repo's engines are built to make exact, and it is why every engine here carries res64.
 
 Per-iteration cost at that size, this box (Xeon w5-3435X), is the honest picture of where a
 single monolithic transform stands against the state of the art:
@@ -214,14 +265,15 @@ single monolithic transform stands against the state of the art:
 | prime95, 10 threads | 0.10 |
 | GMP engine (exact) | 4.1 |
 | FFT engine (FFTW, one 196,608-point transform) | 6.6 |
-| PRPLL on the RTX 3070 Ti (wrong answer, see above) | 0.06 |
-| PRPLL on the Data Center GPU Max 1100 (same wrong answer) | 0.32 |
+| PRPLL on the RTX 3070 Ti (wrong answer before the fix; 59 us after) | 0.06 |
+| PRPLL on the Data Center GPU Max 1100 (same) | 0.32 |
 
 At p = 44,497 the FFT engine is within 1.4x of prime95 (4,608-point FFT: prime95 7 us/iteration,
-FFT engine 10 us); at p ~ 1e5 it trails by about 3x (6K FFT: prime95 8.5 us, FFT engine 25 us). At 3e6 it trails by 12x and falls behind GMP: a 3 MB working set no longer fits a
-core's L2, and one big transform streams it from L3 on every pass, where prime95's Pass1/Pass2
-split keeps each pass in cache and fuses weighting and carry into the transform. That two-pass
-("four-step") structure is the next engine, on the CPU and on the GPU alike.
+FFT engine 10 us); at p ~ 1e5 it trails by about 3x (6K FFT: prime95 8.5 us, FFT engine 25 us).
+At 3e6 it trails by 12x and falls behind GMP: a 3 MB working set no longer fits a core's L2, and
+one big transform streams it from L3 on every pass, where prime95's Pass1/Pass2 split keeps each
+pass in cache and fuses weighting and carry into the transform. That two-pass ("four-step")
+structure is the next engine, on the CPU and on the GPU alike.
 
 ## Splitting one test across threads (`--split`)
 
