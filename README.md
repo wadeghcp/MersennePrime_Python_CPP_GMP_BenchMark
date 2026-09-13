@@ -197,11 +197,11 @@ prime) after 20,000 squarings from s_0 = 4:
 | prime95 v30.19 b20 (`InterimResidues=20000`; prime95 counts the seed as iteration 2, so its "iteration 20002" line) | `CE811E3772129824` |
 | GMP engine, exact | `ce811e3772129824` |
 | FFT engine, fp64, worst rounding error 7e-4 | `ce811e3772129824` |
-| PRPLL/gpuowl master 4d0e759 (2025-12-14), `-ll`, "FP32+M61" 256K FFT, on an RTX 3070 Ti **and** on a Data Center GPU Max 1100 | `d7979bd162116bee` |
+| PRPLL/gpuowl master 4d0e759 (2025-12-14), `-ll`, "FP32+M61" 256K FFT, on an RTX 3070 Ti (3 min 5 s) **and** on a Data Center GPU Max 1100 (16 min 16 s) | `d7979bd162116bee` |
 
 Three independent implementations agree to the bit; the gpuowl development snapshot disagrees
 with all of them, identically on two vendors' GPUs, and reports the known prime as composite
-(res64 `a0ec9abad5afd56e` at the end, "status":"C"). Its own `-prp` mode on the same exponent
+(res64 `a0ec9abad5afd56e` at the end on both GPUs, "status":"C"). Its own `-prp` mode on the same exponent
 trips the Gerbicz check at the first block ("EE ... Consistent error, will stop"), so the error
 is real and deterministic, and plain LL has no check to catch it. Reported upstream.
 
@@ -215,9 +215,10 @@ single monolithic transform stands against the state of the art:
 | GMP engine (exact) | 4.1 |
 | FFT engine (FFTW, one 196,608-point transform) | 6.6 |
 | PRPLL on the RTX 3070 Ti (wrong answer, see above) | 0.06 |
+| PRPLL on the Data Center GPU Max 1100 (same wrong answer) | 0.32 |
 
-At p ~ 1e5 the FFT engine trails prime95 by about 3x (6K FFT: prime95 8.5 us/iteration, FFT
-engine 25 us). At 3e6 it trails by 12x and falls behind GMP: a 3 MB working set no longer fits a
+At p = 44,497 the FFT engine is within 1.4x of prime95 (4,608-point FFT: prime95 7 us/iteration,
+FFT engine 10 us); at p ~ 1e5 it trails by about 3x (6K FFT: prime95 8.5 us, FFT engine 25 us). At 3e6 it trails by 12x and falls behind GMP: a 3 MB working set no longer fits a
 core's L2, and one big transform streams it from L3 on every pass, where prime95's Pass1/Pass2
 split keeps each pass in cache and fuses weighting and carry into the transform. That two-pass
 ("four-step") structure is the next engine, on the CPU and on the GPU alike.
